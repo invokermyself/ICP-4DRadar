@@ -1,0 +1,6 @@
+<launch>
+    
+    <node name="radar_odometry" pkg="odometry_4dradar" type="radar_odometry" output="screen"> 
+        <param name="dataset_folder" type="string" value="/media/invoker/Toshiba_1T/kerb1/" />
+    </node>
+</launch>

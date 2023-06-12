@@ -1,0 +1,9 @@
+# build files
+/build
+
+# vscode files
+/.vscode
+
+# office files
+*.csv
+radar_odometry.txt
