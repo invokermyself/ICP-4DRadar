@@ -36,6 +36,7 @@
   <run_depend>tf</run_depend>
   <run_depend>image_transport</run_depend>
   <run_depend>radar_ego_velocity_estimator</run_depend>
+  <run_depend>fast_gicp</run_depend>
 
   <export>
   </export>

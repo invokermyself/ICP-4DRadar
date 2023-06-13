@@ -16,6 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
     image_transport
     tf
     radar_ego_velocity_estimator
+    fast_gicp
 )
 
 find_package(PCL 1.8 REQUIRED)
