@@ -29,6 +29,7 @@
 #include "ikd_Tree.h"
 #include "radar_ego_velocity_estimator/radar_ego_velocity_estimator.h"
 #include "fast_gicp/gicp/fast_gicp.hpp"
+#include "fast_gicp/gicp/fast_gicp_st.hpp"
 
 #define MAX_SEARCH_RADIUS 2.0f
 
@@ -77,6 +78,8 @@ double para_t[3] = {0, 0, 0};
 double output_time = 0;
 
 pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtreeEdgeFeatureLast(new pcl::KdTreeFLANN<pcl::PointXYZI>());
+pcl::PointCloud<pcl::PointXYZ>::Ptr src(new pcl::PointCloud<pcl::PointXYZ>);
+pcl::PointCloud<pcl::PointXYZ>::Ptr tar(new pcl::PointCloud<pcl::PointXYZ>);
 
 Eigen::Vector3d t(para_t);
 Eigen::Vector4d pos({0, 0, 0, 1});
@@ -98,6 +101,7 @@ std::queue<ImuDataStamped> queue_imu;
 std::queue<sensor_msgs::PointCloud2> queue_radar;
 ImuDataStamped last_imu;
 ImuDataStamped imu_data;
+reve::RadarEgoVelocityEstimator radar_ego_velocity;
 
 void pointAssociateToMap(PointType const *const pi, PointType *const po)
 {
@@ -171,12 +175,17 @@ void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msgs);
 void callbackRadarScan(const sensor_msgs::PointCloud2ConstPtr &radar_msg);
 bool pcl2msgToPcl(const sensor_msgs::PointCloud2 &pcl_msg, pcl::PointCloud<RadarPointCloudType> &scan);
 void main_task();
+void config_init(radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig &config);
 
 int main(int argc, char **argv)
 {
 
   ros::init(argc, argv, "radar_odometry");
   ros::NodeHandle n("~");
+
+  radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig config;
+  config_init(config);
+  radar_ego_velocity.configure(config);
   std::size_t order = 1;
 
   std::string bag_path;
@@ -224,30 +233,69 @@ int main(int argc, char **argv)
 
 void main_task()
 {
-  // GICP
+  pcl::PointCloud<pcl::PointXYZ>::Ptr Final(new pcl::PointCloud<pcl::PointXYZ>);
+  mutex_1.lock();
 
-  pcl::PointCloud<pcl::PointXYZI>::Ptr src(new pcl::PointCloud<pcl::PointXYZI>);
-  pcl::PointCloud<pcl::PointXYZI>::Ptr tar(new pcl::PointCloud<pcl::PointXYZI>);
-  pcl::PointCloud<pcl::PointXYZI>::Ptr Final(new pcl::PointCloud<pcl::PointXYZI>);
-  pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp;
-  // icp.setMaximumIterations(200);
-
-  if (!initialed)
+  if (!queue_radar.empty())
   {
-    icp.setInputTarget(tar);
-    initialed = true;
+    if (initialed)
+    {
+      pcl::copyPointCloud(*src, *tar);
+    }
+    src->clear();
+
+    auto radar_data_msg = queue_radar.front();
+    Vector3 v_r, sigma_v_r;
+    sensor_msgs::PointCloud2 inlier_radar_scan;
+    radar_ego_velocity.estimate(radar_data_msg, v_r, sigma_v_r, inlier_radar_scan);
+    pcl::PointCloud<ColoRadarPointCloudType> scan_ColoRadar;
+    pcl::PCLPointCloud2 pcl_pc2;
+    pcl_conversions::toPCL(inlier_radar_scan, pcl_pc2);
+    pcl::fromPCLPointCloud2(pcl_pc2, scan_ColoRadar);
+    int point_num = scan_ColoRadar.size();
+    for (size_t i = 0; i < point_num; i++)
+    {
+      pcl::PointXYZ p_sel;
+      p_sel.x = scan_ColoRadar.points[i].x;
+      p_sel.y = scan_ColoRadar.points[i].y;
+      p_sel.z = scan_ColoRadar.points[i].z;
+      src->push_back(p_sel);
+    }
+
+    if (!initialed)
+    {
+      pcl::copyPointCloud(*src, *tar);
+      initialed = true;
+    }
+
+    queue_radar.pop();
+
+    // GICP
+
+    fast_gicp::FastGICPSingleThread<pcl::PointXYZ, pcl::PointXYZ> fgicp_st;
+    fgicp_st.clearTarget();
+    fgicp_st.clearSource();
+    fgicp_st.setInputTarget(tar);
+    fgicp_st.setInputSource(src);
+    fgicp_st.align(*Final);
+    auto t2 = std::chrono::high_resolution_clock::now();
+    double score = fgicp_st.getFitnessScore();
+
+    std::cout << "has converged:" << fgicp_st.hasConverged() << " score: " << fgicp_st.getFitnessScore() << std::endl;
+    std::cout << fgicp_st.getFinalTransformation() << std::endl;
+
+    Eigen::Matrix<double, 4, 4> icp_result = fgicp_st.getFinalTransformation().cast<double>();
+
+    t_w_curr = t_w_curr + q_w_curr * t_last_curr;
+    q_w_curr = q_w_curr * q_last_curr;
   }
-  icp.align(*Final);
 
-  std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl;
+  if (!queue_imu.empty())
+  {
+    queue_imu.pop();
+  }
 
-  // output the transformation matrix
-  std::cout << icp.getFinalTransformation() << std::endl;
-  double score = icp.getFitnessScore();
-  Eigen::Matrix<double, 4, 4> icp_result = icp.getFinalTransformation().cast<double>();
-
-  t_w_curr = t_w_curr + q_w_curr * t_last_curr;
-  q_w_curr = q_w_curr * q_last_curr;
+  mutex_1.unlock();
 }
 
 void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msg)
@@ -379,4 +427,43 @@ bool pcl2msgToPcl(const sensor_msgs::PointCloud2 &pcl_msg, pcl::PointCloud<Radar
         "[pcl2msgToPcl]: Unsupported point cloud with fields: " << fields_str.substr(0, fields_str.size() - 2));
     return false;
   }
+}
+
+void config_init(radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig &config)
+{
+  config.min_dist = 0.25;
+  config.max_dist = 100;
+  config.min_db = 0;
+  config.elevation_thresh_deg = 60;
+  config.azimuth_thresh_deg = 60;
+  config.filter_min_z = -3;
+  config.filter_max_z = 3;
+  config.doppler_velocity_correction_factor = 1.0;
+
+  config.thresh_zero_velocity = 0.05;
+  config.allowed_outlier_percentage = 0.25;
+  config.sigma_zero_velocity_x = 0.025;
+  config.sigma_zero_velocity_y = 0.025;
+  config.sigma_zero_velocity_z = 0.025;
+
+  config.sigma_offset_radar_x = 0.05;
+  config.sigma_offset_radar_y = 0.025;
+  config.sigma_offset_radar_z = 0.05;
+
+  config.max_sigma_x = 0.2;
+  config.max_sigma_y = 0.2;
+  config.max_sigma_z = 0.2;
+  config.max_r_cond = 1000;
+
+  config.use_cholesky_instead_of_bdcsvd = true;
+  config.use_ransac = true;
+  config.outlier_prob = 0.4;
+  config.success_prob = 0.9999;
+  config.N_ransac_points = 3;
+  config.inlier_thresh = 0.15;
+  config.use_odr = true;
+  config.sigma_v_d = 0.125;
+  config.min_speed_odr = 4.0;
+  config.model_noise_offset_deg = 2.0;
+  config.model_noise_scale_deg = 10.0;
 }

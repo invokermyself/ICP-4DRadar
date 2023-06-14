@@ -7,3 +7,7 @@
 # office files
 *.csv
 radar_odometry.txt
+
+# cfg files
+/cfg
+/config
