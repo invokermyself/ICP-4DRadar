@@ -6,6 +6,11 @@
         <param name="bag_path" type="string" value="/media/invoker/Toshiba_1T/ColoDataset/edgar_classroom_run0.bag" />
         <param name="topic_imu" type="string" value="/gx5/imu/data" />
         <param name="topic_radar_scan" type="string" value="/mmWaveDataHdl/RScan" />
+        <param name="topic_lidar_gt" type="string" value="/lidar_ground_truth" />
         <rosparam file="$(find odometry_4dradar)/config/$(arg config).yaml" command="load"/>
     </node>
+
+    <!-- 在rviz中显示-->
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find odometry_4dradar)/rviz/radar.rviz" required="true" />
+
 </launch>

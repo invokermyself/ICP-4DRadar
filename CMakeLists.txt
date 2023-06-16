@@ -42,8 +42,8 @@ catkin_package(
 
 list(REMOVE_ITEM PCL_LIBRARIES "vtkproj4")
 
-add_executable(icp4radar src/iterative_closest_point.cpp)
-add_executable(radar_odometry src/radar_odometry.cpp)
+add_executable(icp4radar src/iterative_closest_point.cpp third_party/ikd-Tree/ikd_Tree.cpp)
+add_executable(radar_odometry src/radar_odometry.cpp third_party/ikd-Tree/ikd_Tree.cpp)
 
 target_link_libraries(icp4radar ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${Boost_LIBRARIES})
 target_link_libraries(radar_odometry ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${Boost_LIBRARIES} ${CERES_LIBRARIES})
