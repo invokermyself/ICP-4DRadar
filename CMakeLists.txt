@@ -4,6 +4,7 @@ project(odometry_4dradar)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
 # SET(CMAKE_BUILD_TYPE "Debug")
+# SET(CMAKE_BUILD_TYPE "Release")
 
 find_package(catkin REQUIRED COMPONENTS
     geometry_msgs
@@ -17,6 +18,7 @@ find_package(catkin REQUIRED COMPONENTS
     tf
     radar_ego_velocity_estimator
     fast_gicp
+    radar_msgs
 )
 
 find_package(PCL 1.8 REQUIRED)

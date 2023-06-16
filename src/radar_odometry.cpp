@@ -14,6 +14,7 @@
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/Path.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/NavSatFix.h>
 #include <ros/ros.h>
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
@@ -27,10 +28,12 @@
 #include "userdefine.h"
 #include "radarFactor.hpp"
 #include "tic_toc.h"
+#include "gps2local.hpp"
 #include "ikd_Tree.h"
 #include "radar_ego_velocity_estimator/radar_ego_velocity_estimator.h"
 #include "fast_gicp/gicp/fast_gicp.hpp"
 #include "fast_gicp/gicp/fast_gicp_st.hpp"
+#include "radar_msgs/RadarTarget.h"
 
 #define MAX_SEARCH_RADIUS 2.0f
 
@@ -78,8 +81,11 @@ POINT_CLOUD_REGISTER_POINT_STRUCT (ColoRadarPointCloudType,
 double para_q[4] = {0, 0, 0, 1};
 double para_t[3] = {0, 0, 0};
 double output_time = 0;
-double gt_update = 0;
-double radar_update = 0;
+double twist_update = 0;
+double pose_update = 0;
+
+std::vector<double> radar_update(6);
+std::vector<uint32_t> radar_frame(6);
 
 pcl::PointCloud<pcl::PointXYZI>::Ptr src(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr tar(new pcl::PointCloud<pcl::PointXYZI>);
@@ -97,19 +103,24 @@ Eigen::Map<Eigen::Vector3d> t_last_curr(para_t);
 Eigen::Quaterniond q_w_curr(1, 0, 0, 0);
 Eigen::Vector3d t_w_curr(0, 0, 0);
 
+//init Transformation
+Eigen::Quaterniond q_w_init(0.9994444, -0.00157077, -0.00474173, -0.0329522);
+
 Eigen::Matrix<double, 3, 3> Rtrans;
-Eigen::Matrix<double, 3, 3> R_enu_radar;
+std::vector<Eigen::Matrix<double, 4, 4>> T_enu_radar(6);
 Eigen::MatrixXd currOdom;
 
 bool initialed = false;
 std::mutex mutex_1;
 
 std::queue<ImuDataStamped> queue_imu;
-std::queue<sensor_msgs::PointCloud2> queue_radar;
-std::queue<nav_msgs::Odometry> queue_gt;
+std::vector<std::queue<radar_msgs::RadarTarget>> queue_radar(6);
+std::queue<nav_msgs::Odometry> queue_odom_twist;
+std::queue<sensor_msgs::NavSatFix> queue_odom_pose;
 ImuDataStamped last_imu;
 ImuDataStamped imu_data;
 reve::RadarEgoVelocityEstimator radar_ego_velocity;
+CooTrans gps2xy;
 
 void pointAssociateToMap(PointType const *const pi, PointType *const po)
 {
@@ -180,11 +191,13 @@ std::vector<float> read_radar_featurePoint(const std::string radar_data_path)
 }
 
 void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msgs);
-void callbackRadarScan(const sensor_msgs::PointCloud2ConstPtr &radar_msg);
-void callbackGtPose(const nav_msgs::OdometryConstPtr &gt_msg);
+void callbackRadarScan(const radar_msgs::RadarTargetConstPtr &radar_msg, int radar_no);
+void callbackGtTwist(const nav_msgs::OdometryConstPtr &gt_msg);
+void callbackGtPose(const sensor_msgs::NavSatFixConstPtr &gt_msg);
 bool pcl2msgToPcl(const sensor_msgs::PointCloud2 &pcl_msg, pcl::PointCloud<RadarPointCloudType> &scan);
 void main_task();
 void config_init(radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig &config);
+void RadarPcl2Body(int radar_no);
 
 int main(int argc, char **argv)
 {
@@ -192,7 +205,9 @@ int main(int argc, char **argv)
   ros::init(argc, argv, "radar_odometry");
   ros::NodeHandle n("~");
   ros::Publisher pubRadarCloudSurround = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_surround", 100);
-  ros::Publisher pubOdomGT = n.advertise<nav_msgs::Odometry>("/lidar_gt", 100);
+  ros::Publisher pubRadarCloudLocal = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_local", 100);
+  ros::Publisher pubgtTwist = n.advertise<nav_msgs::Odometry>("/gt_twsit", 100);
+  ros::Publisher pubgtPose = n.advertise<sensor_msgs::NavSatFix>("/gt_pose", 100);
   radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig config;
   config_init(config);
   radar_ego_velocity.configure(config);
@@ -200,26 +215,66 @@ int main(int argc, char **argv)
 
   std::string bag_path;
   std::string topic_imu;
-  std::string topic_radar_scan;
-  std::string topic_lidar_gt;
+  std::vector<std::string> topic_radar(6);
+  std::string topic_gt_twist;
+  std::string topic_gt_pose;
   n.getParam("bag_path", bag_path);
   n.getParam("topic_imu", topic_imu);
-  n.getParam("topic_radar_scan", topic_radar_scan);
-  n.getParam("topic_lidar_gt", topic_lidar_gt);
+  n.getParam("topic_radar0", topic_radar[0]);
+  n.getParam("topic_radar1", topic_radar[1]);
+  n.getParam("topic_radar2", topic_radar[2]);
+  n.getParam("topic_radar3", topic_radar[3]);
+  n.getParam("topic_radar4", topic_radar[4]);
+  n.getParam("topic_radar5", topic_radar[5]);
+  n.getParam("topic_gt_twist", topic_gt_twist);
+  n.getParam("topic_gt_pose", topic_gt_pose);
 
   ros::Rate r(100.0);
 
-  R_enu_radar << 0.000796, -1, 0,
-  1, 0.000796, 0,
-  0, 0, 1;
+  // add calib
+  T_enu_radar[0] << 0.6916, -0.7222, -0.009174, 3.65,
+      0.7222, 0.6916, -0.00958, 1.02,
+      0.01326, 0, 0.9999, 0.68,
+      0, 0, 0, 1;
+
+  T_enu_radar[1] << 0.9999, 0.008901, 0.01257, 3.7,
+      -0.0089, 1, -0.0001119, -0.135,
+      -0.01257, 0, 0.9999, 0.67,
+      0, 0, 0, 1;
+
+  T_enu_radar[2] << 0.695, 0.719, 0.01031, 3.65,
+      -0.7189, 0.695, -0.01067, -1.04,
+      -0.01483, 0, 0.9999, 0.66,
+      0, 0, 0, 1;
+
+  T_enu_radar[3] << -0.6785, -0.7328, 0.0522, -1.03,
+      0.7306, -0.6805, -0.05622, 0.86,
+      0.07672, 0, 0.9971, 0.6,
+      0, 0, 0, 1;
+
+  T_enu_radar[4] << -1, -0.004887, -0.005236, -1.165,
+      0.004887, -1, 0.0000256, -0.15,
+      -0.005236, 0, 1, 0.635,
+      0, 0, 0, 1;
+
+  T_enu_radar[5] << -0.7046, 0.7096, -0.0, -1,
+      -0.7096, -0.7046, -0.0, -0.88,
+      -0.0, 0, 1, 0.6,
+      0, 0, 0, 1;
 
   // read bag
   rosbag::Bag source_bag;
   source_bag.open(bag_path, rosbag::bagmode::Read);
   std::vector<std::string> topics;
   topics.push_back(topic_imu);
-  topics.push_back(topic_radar_scan);
-  topics.push_back(topic_lidar_gt);
+  topics.push_back(topic_radar[0]);
+  topics.push_back(topic_radar[1]);
+  topics.push_back(topic_radar[2]);
+  topics.push_back(topic_radar[3]);
+  topics.push_back(topic_radar[4]);
+  topics.push_back(topic_radar[5]);
+  topics.push_back(topic_gt_twist);
+  topics.push_back(topic_gt_pose);
 
   rosbag::View view(source_bag, rosbag::TopicQuery(topics));
 
@@ -235,22 +290,64 @@ int main(int argc, char **argv)
       }
     }
 
-    else if (topic == topic_radar_scan)
+    else if (topic == topic_radar[0])
     {
-      const auto radar_scan = m.instantiate<sensor_msgs::PointCloud2>();
+      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
       if (radar_scan != NULL)
-        callbackRadarScan(radar_scan);
+        callbackRadarScan(radar_scan, 0);
     }
 
-    else if (topic == topic_lidar_gt)
+    else if (topic == topic_radar[1])
     {
-      const auto gt_pose = m.instantiate<nav_msgs::Odometry>();
-      
-      if (gt_pose != NULL)
+      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
+      if (radar_scan != NULL)
+        callbackRadarScan(radar_scan, 1);
+    }
+    else if (topic == topic_radar[2])
+    {
+      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
+      if (radar_scan != NULL)
+        callbackRadarScan(radar_scan, 2);
+    }
+    else if (topic == topic_radar[3])
+    {
+      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
+      if (radar_scan != NULL)
+        callbackRadarScan(radar_scan, 3);
+    }
+    else if (topic == topic_radar[4])
+    {
+      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
+      if (radar_scan != NULL)
+        callbackRadarScan(radar_scan, 4);
+    }
+    else if (topic == topic_radar[5])
+    {
+      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
+      if (radar_scan != NULL)
+        callbackRadarScan(radar_scan, 5);
+    }
+
+    else if (topic == topic_gt_twist)
+    {
+      const auto gt_twist = m.instantiate<nav_msgs::Odometry>();
+
+      if (gt_twist != NULL)
       {
-        gt_pose->header.frame_id = "/camera_init";
-        pubOdomGT.publish(gt_pose);
-        callbackGtPose(gt_pose);
+        gt_twist->header.frame_id = "/camera_init";
+        pubgtTwist.publish(gt_twist);
+        callbackGtTwist(gt_twist);
+      }
+    }
+
+    else if (topic == topic_gt_pose)
+    {
+      const auto gt_psoe = m.instantiate<sensor_msgs::NavSatFix>();
+      if (gt_psoe != NULL)
+      {
+        gt_psoe->header.frame_id = "/camera_init";
+        pubgtTwist.publish(gt_psoe);
+        callbackGtPose(gt_psoe);
       }
     }
 
@@ -258,73 +355,74 @@ int main(int argc, char **argv)
 
     main_task();
 
-    sensor_msgs::PointCloud2 RadarCloudSurround;
-    pcl::toROSMsg(*downSizeFilterMap, RadarCloudSurround);
-    RadarCloudSurround.header.stamp = ros::Time().now();
-    RadarCloudSurround.header.frame_id = "/camera_init";
-    pubRadarCloudSurround.publish(RadarCloudSurround);
+    uint32_t maxcnt = *max_element(radar_frame.begin(), radar_frame.end());
+    uint32_t mincnt = *min_element(radar_frame.begin(), radar_frame.end());
+    if (maxcnt == mincnt) // the same seq
+    {
+      sensor_msgs::PointCloud2 RadarCloudLocal;
+      pcl::toROSMsg(*src, RadarCloudLocal);
+      RadarCloudLocal.header.stamp = ros::Time().now();
+      RadarCloudLocal.header.frame_id = "/camera_init";
+      pubRadarCloudLocal.publish(RadarCloudLocal);
+
+      double time_diff = fabs(twist_update - *max_element(radar_update.begin(), radar_update.end()));
+      if (time_diff < 0.05)
+      {
+        size_t PointNum = src->size();
+        PointType p_sel;
+        for (size_t i = 0; i < PointNum; i++)
+        {
+          pointAssociateToMap(&src->points[i], &p_sel);
+          RadarCloudMap->push_back(p_sel);
+        }
+      }
+      pcl::VoxelGrid<pcl::PointXYZI> sor;
+      sor.setInputCloud(RadarCloudMap);
+      sor.setLeafSize(0.5f, 0.5f, 0.5f);
+      sor.filter(*downSizeFilterMap);
+      sensor_msgs::PointCloud2 RadarCloudSurround;
+      pcl::toROSMsg(*downSizeFilterMap, RadarCloudSurround);
+      RadarCloudSurround.header.stamp = ros::Time().now();
+      RadarCloudSurround.header.frame_id = "/camera_init";
+      pubRadarCloudSurround.publish(RadarCloudSurround);
+
+      src->clear();
+    }
   }
 }
 
 void main_task()
 {
-  pcl::PointCloud<pcl::PointXYZI>::Ptr Final(new pcl::PointCloud<pcl::PointXYZI>);
   mutex_1.lock();
 
-  if (!queue_radar.empty())
+  if (!queue_radar[0].empty())
   {
-    if (initialed)
-    {
-      pcl::copyPointCloud(*src, *tar);
-    }
-    src->clear();
+    RadarPcl2Body(0);
+  }
 
-    auto radar_data_msg = queue_radar.front();
-    Vector3 v_r, sigma_v_r;
-    sensor_msgs::PointCloud2 inlier_radar_scan;
-    radar_ego_velocity.estimate(radar_data_msg, v_r, sigma_v_r, inlier_radar_scan);
-    pcl::PointCloud<ColoRadarPointCloudType> scan_ColoRadar;
-    pcl::PCLPointCloud2 pcl_pc2;
-    pcl_conversions::toPCL(inlier_radar_scan, pcl_pc2);
-    pcl::fromPCLPointCloud2(pcl_pc2, scan_ColoRadar);
-    int point_num = scan_ColoRadar.size();
-    for (size_t i = 0; i < point_num; i++)
-    {
-      pcl::PointXYZI p_sel;
-      p_sel.x = scan_ColoRadar.points[i].x;
-      p_sel.y = scan_ColoRadar.points[i].y;
-      p_sel.z = scan_ColoRadar.points[i].z;
-      p_sel.intensity = scan_ColoRadar.points[i].intensity;
-      src->push_back(p_sel);
-    }
+  if (!queue_radar[1].empty())
+  {
+    RadarPcl2Body(1);
+  }
 
-    if (!initialed)
-    {
-      pcl::copyPointCloud(*src, *tar);
-      initialed = true;
-    }
-    radar_update = radar_data_msg.header.stamp.toSec();
+  if (!queue_radar[2].empty())
+  {
+    RadarPcl2Body(2);
+  }
 
-    queue_radar.pop();
+  if (!queue_radar[3].empty())
+  {
+    RadarPcl2Body(3);
+  }
 
-    // GICP
+  if (!queue_radar[4].empty())
+  {
+    RadarPcl2Body(4);
+  }
 
-    fast_gicp::FastGICPSingleThread<pcl::PointXYZI, pcl::PointXYZI> fgicp_st;
-    fgicp_st.clearTarget();
-    fgicp_st.clearSource();
-    fgicp_st.setInputTarget(tar);
-    fgicp_st.setInputSource(src);
-    fgicp_st.align(*Final);
-    auto t2 = std::chrono::high_resolution_clock::now();
-    double score = fgicp_st.getFitnessScore();
-
-    std::cout << "has converged:" << fgicp_st.hasConverged() << " score: " << fgicp_st.getFitnessScore() << std::endl;
-    std::cout << fgicp_st.getFinalTransformation() << std::endl;
-
-    Eigen::Matrix<double, 4, 4> icp_result = fgicp_st.getFinalTransformation().cast<double>();
-
-    // t_w_curr = t_w_curr + q_w_curr * t_last_curr;
-    // q_w_curr = q_w_curr * q_last_curr;
+  if (!queue_radar[5].empty())
+  {
+    RadarPcl2Body(5);
   }
 
   if (!queue_imu.empty())
@@ -332,35 +430,40 @@ void main_task()
     queue_imu.pop();
   }
 
-  if (!queue_gt.empty())
+  if (!queue_odom_twist.empty())
   {
-    auto gt_msg = queue_gt.front();
-    t_w_curr(0) = gt_msg.pose.pose.position.x;
-    t_w_curr(1) = gt_msg.pose.pose.position.y;
-    t_w_curr(2) = gt_msg.pose.pose.position.z;
+    auto gt_msg = queue_odom_twist.front();
+
     q_w_curr.x() = gt_msg.pose.pose.orientation.x;
     q_w_curr.y() = gt_msg.pose.pose.orientation.y;
     q_w_curr.z() = gt_msg.pose.pose.orientation.z;
     q_w_curr.w() = gt_msg.pose.pose.orientation.w;
-    Rtrans = R_enu_radar*q_w_curr.toRotationMatrix();
-    gt_update = gt_msg.header.stamp.toSec();
-    double time_diff = gt_update - radar_update;
-    if (time_diff < 0.1)
-    {
-      size_t PointNum = src->size();
-      PointType p_sel;
-      for (size_t i = 0; i < PointNum; i++)
-      {
-        pointAssociateToMap(&src->points[i], &p_sel);
-        RadarCloudMap->push_back(p_sel);
-      }
-    }
-    pcl::VoxelGrid<pcl::PointXYZI> sor;
-    sor.setInputCloud(RadarCloudMap);
-    sor.setLeafSize(0.05f, 0.05f, 0.05f);
-    sor.filter(*downSizeFilterMap);
-    queue_gt.pop();
+    Rtrans = q_w_curr.toRotationMatrix();
+    twist_update = gt_msg.header.stamp.toSec();
 
+    queue_odom_twist.pop();
+  }
+
+  if (!queue_odom_pose.empty())
+  {
+    auto gt_pose = queue_odom_pose.front();
+    double x, y, z;
+    if (!initialed)
+    {
+      gps2xy.SetECEFOw(gt_pose.latitude, gt_pose.longitude, gt_pose.altitude);
+      initialed = true;
+    }
+    else
+    {
+      gps2xy.getENH(gt_pose.latitude, gt_pose.longitude, gt_pose.altitude, x, y, z);
+    }
+    t_w_curr(0) = y;
+    t_w_curr(1) = -x;
+    t_w_curr(2) = z;
+
+    pose_update = gt_pose.header.stamp.toSec();
+
+    queue_odom_pose.pop();
   }
 
   mutex_1.unlock();
@@ -377,18 +480,73 @@ void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msg)
   mutex_1.unlock();
 }
 
-void callbackRadarScan(const sensor_msgs::PointCloud2ConstPtr &radar_msg)
+void callbackRadarScan(const radar_msgs::RadarTargetConstPtr &radar_msg, int radar_no)
 {
+  if (radar_no < 0 || radar_no > 5)
+  {
+    std::cout << "wrong radar no. !!!" << std::endl;
+  }
   mutex_1.lock();
-  queue_radar.push(*radar_msg);
+  queue_radar[radar_no].push(*radar_msg);
   mutex_1.unlock();
 }
 
-void callbackGtPose(const nav_msgs::OdometryConstPtr &gt_msg)
+void callbackGtTwist(const nav_msgs::OdometryConstPtr &gt_msg)
 {
   mutex_1.lock();
-  queue_gt.push(*gt_msg);
+  queue_odom_twist.push(*gt_msg);
   mutex_1.unlock();
+}
+
+void callbackGtPose(const sensor_msgs::NavSatFixConstPtr &gt_msg)
+{
+  mutex_1.lock();
+  queue_odom_pose.push(*gt_msg);
+  mutex_1.unlock();
+}
+
+void RadarPcl2Body(int radar_no)
+{
+  auto radar_data_msg = queue_radar[radar_no].front();
+  Vector3 v_r, sigma_v_r;
+  sensor_msgs::PointCloud2 inlier_radar_scan;
+  sensor_msgs::PointCloud2 radar_ros_msg;
+  pcl::PointCloud<RadarPointCloudType> radar_pcl;
+  int num = radar_data_msg.targetNum;
+  for (size_t i = 0; i < num; i++)
+  {
+    RadarPointCloudType p_sel;
+    p_sel.x = radar_data_msg.x[i];
+    p_sel.y = radar_data_msg.y[i];
+    p_sel.z = radar_data_msg.z[i];
+    p_sel.snr_db = radar_data_msg.power[i];
+    p_sel.v_doppler_mps = radar_data_msg.v[i];
+    p_sel.noise_db = radar_data_msg.snr[i];
+    p_sel.range = sqrt(pow(p_sel.x, 2) + pow(p_sel.y, 2) + pow(p_sel.z, 2));
+    radar_pcl.push_back(p_sel);
+  }
+  pcl::toROSMsg(radar_pcl, radar_ros_msg);
+  radar_ego_velocity.estimate(radar_ros_msg, v_r, sigma_v_r, inlier_radar_scan);
+  pcl::PointCloud<RadarPointCloudType> scan_ColoRadar;
+  pcl::PCLPointCloud2 pcl_pc2;
+  pcl_conversions::toPCL(inlier_radar_scan, pcl_pc2);
+  pcl::fromPCLPointCloud2(pcl_pc2, scan_ColoRadar);
+  int point_num = scan_ColoRadar.size();
+  for (size_t i = 0; i < point_num; i++)
+  {
+    PointType p_sel;
+    PointType p_sel_body;
+    p_sel.x = scan_ColoRadar.points[i].x;
+    p_sel.y = scan_ColoRadar.points[i].y;
+    p_sel.z = scan_ColoRadar.points[i].z;
+    p_sel.intensity = scan_ColoRadar.points[i].snr_db;
+    pointAssociateToSubMap(&p_sel, &p_sel_body, T_enu_radar[radar_no]);
+    src->push_back(p_sel_body);
+  }
+  radar_update[radar_no] = radar_data_msg.header.stamp.toSec();
+  radar_frame[radar_no] = radar_data_msg.frameCnt;
+
+  queue_radar[radar_no].pop();
 }
 
 bool pcl2msgToPcl(const sensor_msgs::PointCloud2 &pcl_msg, pcl::PointCloud<RadarPointCloudType> &scan)
