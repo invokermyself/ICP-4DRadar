@@ -86,12 +86,12 @@ Visualization Manager:
       Use rainbow: true
       Value: false
     - Class: rviz/Axes
-      Enabled: true
+      Enabled: false
       Length: 10
       Name: Axes
       Radius: 0.10000000149011612
       Reference Frame: <Fixed Frame>
-      Value: true
+      Value: false
     - Alpha: 1
       Buffer Length: 1
       Class: rviz/Path
@@ -269,16 +269,16 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 1063.0404052734375
+      Distance: 573.4893798828125
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 716.2548828125
-        Y: -582.5521850585938
-        Z: -33.4918098449707
+        X: 42.6844367980957
+        Y: -150.69564819335938
+        Z: -53.18447494506836
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false

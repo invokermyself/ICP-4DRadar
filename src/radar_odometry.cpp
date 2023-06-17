@@ -262,12 +262,12 @@ int main(int argc, char **argv)
   source_bag.open(bag_path, rosbag::bagmode::Read);
   std::vector<std::string> topics;
   topics.push_back(topic_imu);
-  topics.push_back(topic_radar[0]);
+  // topics.push_back(topic_radar[0]);
   topics.push_back(topic_radar[1]);
-  topics.push_back(topic_radar[2]);
-  topics.push_back(topic_radar[3]);
-  topics.push_back(topic_radar[4]);
-  topics.push_back(topic_radar[5]);
+  // topics.push_back(topic_radar[2]);
+  // topics.push_back(topic_radar[3]);
+  // topics.push_back(topic_radar[4]);
+  // topics.push_back(topic_radar[5]);
   topics.push_back(topic_gt_twist);
   topics.push_back(topic_gt_pose);
 
@@ -355,11 +355,11 @@ int main(int argc, char **argv)
     double maxtime = *max_element(radar_update.begin(), radar_update.end());
     double mintime = *min_element(radar_update.begin(), radar_update.end());
     
-    if (recv_radar_cnt == 6) // the same seq
+    if (recv_radar_cnt == 1) // the same seq
     {
       
       double time_diff = fabs(twist_update - *max_element(radar_update.begin(), radar_update.end()));
-      if (time_diff < 0.05)
+      if (1)
       {
         size_t PointNum = src->size();
         PointType p_sel;
@@ -392,7 +392,7 @@ int main(int argc, char **argv)
       recv_radar_cnt = 0;
     }
 
-    else if (recv_radar_cnt > 6)
+    else if (recv_radar_cnt > 1)
     {
       recv_radar_cnt = 0;
     }
