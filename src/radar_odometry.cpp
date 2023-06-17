@@ -38,7 +38,6 @@
 #define MAX_SEARCH_RADIUS 2.0f
 
 using namespace std;
-using PointVector = KD_TREE<ikdTree_PointType>::PointVector;
 
 // clang-format off
 POINT_CLOUD_REGISTER_POINT_STRUCT(RadarPointCloudType,
@@ -83,18 +82,15 @@ double para_t[3] = {0, 0, 0};
 double output_time = 0;
 double twist_update = 0;
 double pose_update = 0;
-
+int recv_radar_cnt = 0;
 std::vector<double> radar_update(6);
 std::vector<uint32_t> radar_frame(6);
 
 pcl::PointCloud<pcl::PointXYZI>::Ptr src(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr tar(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudMap(new pcl::PointCloud<pcl::PointXYZI>);
+pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudLocal(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr downSizeFilterMap(new pcl::PointCloud<pcl::PointXYZI>);
-KD_TREE<pcl::PointXYZI> ikd_Tree(0.3, 0.6, 0.2);
-
-Eigen::Vector3d t(para_t);
-Eigen::Vector4d pos({0, 0, 0, 1});
 
 Eigen::Map<Eigen::Quaterniond> q_last_curr(para_q);
 Eigen::Map<Eigen::Vector3d> t_last_curr(para_t);
@@ -103,14 +99,15 @@ Eigen::Map<Eigen::Vector3d> t_last_curr(para_t);
 Eigen::Quaterniond q_w_curr(1, 0, 0, 0);
 Eigen::Vector3d t_w_curr(0, 0, 0);
 
-//init Transformation
+// init Transformation
 Eigen::Quaterniond q_w_init(0.9994444, -0.00157077, -0.00474173, -0.0329522);
 
 Eigen::Matrix<double, 3, 3> Rtrans;
+Eigen::Matrix<double, 3, 3> R_init;
 std::vector<Eigen::Matrix<double, 4, 4>> T_enu_radar(6);
-Eigen::MatrixXd currOdom;
 
-bool initialed = false;
+bool pose_initialed = false;
+bool twist_initialed = false;
 std::mutex mutex_1;
 
 std::queue<ImuDataStamped> queue_imu;
@@ -135,7 +132,7 @@ void pointAssociateToMap(PointType const *const pi, PointType *const po)
 void pointAssociateToSubMap(PointType const *const pi, PointType *const po, Eigen::Matrix<double, 4, 4> Trans)
 {
   Eigen::Vector4d point_curr(pi->x, pi->y, pi->z, 1.0);
-  Eigen::Vector4d point_w = Trans.inverse() * point_curr;
+  Eigen::Vector4d point_w = Trans * point_curr;
   po->x = point_w.x();
   po->y = point_w.y();
   po->z = point_w.z();
@@ -198,6 +195,7 @@ bool pcl2msgToPcl(const sensor_msgs::PointCloud2 &pcl_msg, pcl::PointCloud<Radar
 void main_task();
 void config_init(radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig &config);
 void RadarPcl2Body(int radar_no);
+static Eigen::Vector3d R2rpy(const Eigen::Matrix3d &R);
 
 int main(int argc, char **argv)
 {
@@ -211,7 +209,6 @@ int main(int argc, char **argv)
   radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig config;
   config_init(config);
   radar_ego_velocity.configure(config);
-  std::size_t order = 1;
 
   std::string bag_path;
   std::string topic_imu;
@@ -228,8 +225,6 @@ int main(int argc, char **argv)
   n.getParam("topic_radar5", topic_radar[5]);
   n.getParam("topic_gt_twist", topic_gt_twist);
   n.getParam("topic_gt_pose", topic_gt_pose);
-
-  ros::Rate r(100.0);
 
   // add calib
   T_enu_radar[0] << 0.6916, -0.7222, -0.009174, 3.65,
@@ -357,14 +352,12 @@ int main(int argc, char **argv)
 
     uint32_t maxcnt = *max_element(radar_frame.begin(), radar_frame.end());
     uint32_t mincnt = *min_element(radar_frame.begin(), radar_frame.end());
-    if (maxcnt == mincnt) // the same seq
+    double maxtime = *max_element(radar_update.begin(), radar_update.end());
+    double mintime = *min_element(radar_update.begin(), radar_update.end());
+    
+    if (recv_radar_cnt == 6) // the same seq
     {
-      sensor_msgs::PointCloud2 RadarCloudLocal;
-      pcl::toROSMsg(*src, RadarCloudLocal);
-      RadarCloudLocal.header.stamp = ros::Time().now();
-      RadarCloudLocal.header.frame_id = "/camera_init";
-      pubRadarCloudLocal.publish(RadarCloudLocal);
-
+      
       double time_diff = fabs(twist_update - *max_element(radar_update.begin(), radar_update.end()));
       if (time_diff < 0.05)
       {
@@ -374,8 +367,17 @@ int main(int argc, char **argv)
         {
           pointAssociateToMap(&src->points[i], &p_sel);
           RadarCloudMap->push_back(p_sel);
+          RadarCloudLocal->push_back(p_sel);
         }
       }
+
+      sensor_msgs::PointCloud2 RadarCloudLocalRos;
+      pcl::toROSMsg(*RadarCloudLocal, RadarCloudLocalRos);
+      RadarCloudLocalRos.header.stamp = ros::Time().now();
+      RadarCloudLocalRos.header.frame_id = "/camera_init";
+      pubRadarCloudLocal.publish(RadarCloudLocalRos);
+      RadarCloudLocal->clear();
+
       pcl::VoxelGrid<pcl::PointXYZI> sor;
       sor.setInputCloud(RadarCloudMap);
       sor.setLeafSize(0.5f, 0.5f, 0.5f);
@@ -387,6 +389,12 @@ int main(int argc, char **argv)
       pubRadarCloudSurround.publish(RadarCloudSurround);
 
       src->clear();
+      recv_radar_cnt = 0;
+    }
+
+    else if (recv_radar_cnt > 6)
+    {
+      recv_radar_cnt = 0;
     }
   }
 }
@@ -438,8 +446,19 @@ void main_task()
     q_w_curr.y() = gt_msg.pose.pose.orientation.y;
     q_w_curr.z() = gt_msg.pose.pose.orientation.z;
     q_w_curr.w() = gt_msg.pose.pose.orientation.w;
-    Rtrans = q_w_curr.toRotationMatrix();
+
+    if (!twist_initialed)
+    {
+      Rtrans = Eigen::Matrix<double, 3, 3>::Identity();
+      R_init = q_w_curr.toRotationMatrix();
+      twist_initialed = true;
+    }
+    else
+    {
+      Rtrans = R_init.transpose() * q_w_curr.toRotationMatrix();
+    }
     twist_update = gt_msg.header.stamp.toSec();
+    Vector3 eul = R2rpy(q_w_curr.toRotationMatrix());
 
     queue_odom_twist.pop();
   }
@@ -447,19 +466,22 @@ void main_task()
   if (!queue_odom_pose.empty())
   {
     auto gt_pose = queue_odom_pose.front();
-    double x, y, z;
-    if (!initialed)
+    Vector3 xyz(0, 0, 0);
+    if (!pose_initialed)
     {
-      gps2xy.SetECEFOw(gt_pose.latitude, gt_pose.longitude, gt_pose.altitude);
-      initialed = true;
+      gps2xy.SetECEFOw(gt_pose.latitude * M_PI / 180.0, gt_pose.longitude * M_PI / 180.0, gt_pose.altitude);
+      pose_initialed = true;
     }
     else
     {
-      gps2xy.getENH(gt_pose.latitude, gt_pose.longitude, gt_pose.altitude, x, y, z);
+      gps2xy.getENH(gt_pose.latitude * M_PI / 180.0, gt_pose.longitude * M_PI / 180.0, gt_pose.altitude, xyz(0), xyz(1), xyz(2));
     }
-    t_w_curr(0) = y;
-    t_w_curr(1) = -x;
-    t_w_curr(2) = z;
+
+    // t_w_curr(0) = xyz(1);
+    // t_w_curr(1) = -xyz(0);
+    // t_w_curr(2) = xyz(2);
+    t_w_curr = xyz;
+    t_w_curr = R_init.transpose() * t_w_curr;
 
     pose_update = gt_pose.header.stamp.toSec();
 
@@ -544,122 +566,10 @@ void RadarPcl2Body(int radar_no)
     src->push_back(p_sel_body);
   }
   radar_update[radar_no] = radar_data_msg.header.stamp.toSec();
-  radar_frame[radar_no] = radar_data_msg.frameCnt;
+  radar_frame[radar_no] = radar_data_msg.header.seq;
+  recv_radar_cnt++;
 
   queue_radar[radar_no].pop();
-}
-
-bool pcl2msgToPcl(const sensor_msgs::PointCloud2 &pcl_msg, pcl::PointCloud<RadarPointCloudType> &scan)
-{
-  // TODO: add support for ti_mmwave_rospkg clound type
-
-  std::set<std::string> fields;
-  std::string fields_str = "";
-
-  for (const auto &field : pcl_msg.fields)
-  {
-    fields.emplace(field.name);
-    fields_str += field.name + ", ";
-  }
-
-  if (fields.find("x") != fields.end() && fields.find("y") != fields.end() && fields.find("z") != fields.end() &&
-      fields.find("snr_db") != fields.end() && fields.find("noise_db") != fields.end() &&
-      fields.find("v_doppler_mps") != fields.end())
-  {
-    ROS_INFO_ONCE("[pcl2msgToPcl]: Detected rio pcl format!");
-    pcl::PCLPointCloud2 pcl_pc2;
-    pcl_conversions::toPCL(pcl_msg, pcl_pc2);
-    pcl::fromPCLPointCloud2(pcl_pc2, scan);
-
-    // fix format
-    for (auto &p : scan)
-      p.range = p.getVector3fMap().norm();
-
-    return true;
-  }
-  else if (fields.find("x") != fields.end() && fields.find("y") != fields.end() && fields.find("z") != fields.end() &&
-           fields.find("intensity") != fields.end() && fields.find("velocity") != fields.end())
-  {
-    ROS_INFO_ONCE("[pcl2msgToPcl]: Detected ti_mmwave_rospkg pcl format!");
-
-    pcl::PointCloud<mmWaveCloudType> scan_mmwave;
-    pcl::PCLPointCloud2 pcl_pc2;
-    pcl_conversions::toPCL(pcl_msg, pcl_pc2);
-    pcl::fromPCLPointCloud2(pcl_pc2, scan_mmwave);
-
-    scan.clear();
-    for (const auto &p : scan_mmwave)
-    {
-      RadarPointCloudType p_;
-      p_.x = -p.y;
-      p_.y = p.x;
-      p_.z = p.z;
-      p_.snr_db = p.intensity;
-      p_.v_doppler_mps = p.velocity;
-      p_.range = p.getVector3fMap().norm();
-      p_.noise_db = -1.;
-      scan.push_back(p_);
-    }
-    return true;
-  }
-  else if (fields.find("x") != fields.end() && fields.find("y") != fields.end() && fields.find("z") != fields.end() &&
-           fields.find("Doppler") != fields.end() && fields.find("Range") != fields.end() && fields.find("Power") != fields.end() && fields.find("Alpha") != fields.end() && fields.find("Beta") != fields.end())
-  {
-    ROS_INFO_ONCE("[pcl2msgToPcl]: Detected oculii pcl format!");
-
-    pcl::PointCloud<OculiiPointCloudType> scan_oculii;
-    pcl::PCLPointCloud2 pcl_pc2;
-    pcl_conversions::toPCL(pcl_msg, pcl_pc2);
-    pcl::fromPCLPointCloud2(pcl_pc2, scan_oculii);
-
-    scan.clear();
-    for (const auto &p : scan_oculii)
-    {
-      RadarPointCloudType p_;
-      p_.x = p.x;
-      p_.y = p.y;
-      p_.z = p.z;
-      p_.snr_db = p.Power;
-      p_.v_doppler_mps = p.Doppler;
-      p_.range = p.Range;
-      p_.noise_db = -1.;
-      scan.push_back(p_);
-    }
-    return true;
-  }
-
-  else if (fields.find("x") != fields.end() && fields.find("y") != fields.end() && fields.find("z") != fields.end() &&
-           fields.find("intensity") != fields.end() && fields.find("range") != fields.end() && fields.find("doppler") != fields.end())
-  {
-    ROS_INFO_ONCE("[pcl2msgToPcl]: Detected ColoRadar pcl format!");
-
-    pcl::PointCloud<ColoRadarPointCloudType> scan_ColoRadar;
-    pcl::PCLPointCloud2 pcl_pc2;
-    pcl_conversions::toPCL(pcl_msg, pcl_pc2);
-    pcl::fromPCLPointCloud2(pcl_pc2, scan_ColoRadar);
-
-    scan.clear();
-    for (const auto &p : scan_ColoRadar)
-    {
-      RadarPointCloudType p_;
-      p_.x = p.x;
-      p_.y = p.y;
-      p_.z = p.z;
-      p_.snr_db = p.intensity;
-      p_.v_doppler_mps = p.doppler;
-      p_.range = p.range;
-      p_.noise_db = -1.;
-      scan.push_back(p_);
-    }
-    return true;
-  }
-
-  else
-  {
-    ROS_ERROR_STREAM(
-        "[pcl2msgToPcl]: Unsupported point cloud with fields: " << fields_str.substr(0, fields_str.size() - 2));
-    return false;
-  }
 }
 
 void config_init(radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig &config)
@@ -699,4 +609,21 @@ void config_init(radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig 
   config.min_speed_odr = 4.0;
   config.model_noise_offset_deg = 2.0;
   config.model_noise_scale_deg = 10.0;
+}
+
+static Eigen::Vector3d R2rpy(const Eigen::Matrix3d &R)
+{
+  Eigen::Vector3d n = R.col(0);
+  Eigen::Vector3d o = R.col(1);
+  Eigen::Vector3d a = R.col(2);
+
+  Eigen::Vector3d rpy(3);
+  double y = atan2(n(1), n(0));
+  double p = atan2(-n(2), n(0) * cos(y) + n(1) * sin(y));
+  double r = atan2(a(0) * sin(y) - a(1) * cos(y), -o(0) * sin(y) + o(1) * cos(y));
+  rpy(0) = r;
+  rpy(1) = p;
+  rpy(2) = y;
+
+  return rpy / M_PI * 180.0;
 }
