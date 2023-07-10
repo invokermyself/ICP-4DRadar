@@ -2,7 +2,7 @@
 /build
 
 # vscode files
-/.vscode
+/.vscode/settings.json
 
 # office files
 *.csv

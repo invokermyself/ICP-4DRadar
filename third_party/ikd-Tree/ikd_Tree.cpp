@@ -1,4 +1,5 @@
 #include "ikd_Tree.h"
+#include "math.h"
 
 /*
 Description: ikd-Tree: an incremental k-d tree for robotic applications 
@@ -1087,6 +1088,49 @@ void KD_TREE<PointType>::Search_by_radius(KD_TREE_NODE *root, PointType point, f
 }
 
 template <typename PointType>
+void KD_TREE<PointType>::Search_by_sector(KD_TREE_NODE *root, PointType point, float radius, float heading, PointVector &Storage)
+{
+    if (root == nullptr)
+        return;
+    Push_Down(root);
+    PointType range_center;
+    range_center.x = (root->node_range_x[0] + root->node_range_x[1]) * 0.5;
+    range_center.y = (root->node_range_y[0] + root->node_range_y[1]) * 0.5;
+    range_center.z = (root->node_range_z[0] + root->node_range_z[1]) * 0.5;
+    float dist = sqrt(calc_dist(range_center, point));
+    if (dist > radius + sqrt(root->radius_sq)) return;
+    if (dist <= radius - sqrt(root->radius_sq)) 
+    {
+        flatten(root, Storage, NOT_RECORD);
+        return;
+    }
+    if (!root->point_deleted && calc_dist(root->point, point) <= radius * radius && fabs( calc_heading(root->point, point) - heading) < 60 ){
+        Storage.push_back(root->point);
+    }
+    if ((Rebuild_Ptr == nullptr) || root->left_son_ptr != *Rebuild_Ptr)
+    {
+        Search_by_radius(root->left_son_ptr, point, radius, Storage);
+    }
+    else
+    {
+        pthread_mutex_lock(&search_flag_mutex);
+        Search_by_radius(root->left_son_ptr, point, radius, Storage);
+        pthread_mutex_unlock(&search_flag_mutex);
+    }
+    if ((Rebuild_Ptr == nullptr) || root->right_son_ptr != *Rebuild_Ptr)
+    {
+        Search_by_radius(root->right_son_ptr, point, radius, Storage);
+    }
+    else
+    {
+        pthread_mutex_lock(&search_flag_mutex);
+        Search_by_radius(root->right_son_ptr, point, radius, Storage);
+        pthread_mutex_unlock(&search_flag_mutex);
+    }    
+    return;
+}
+
+template <typename PointType>
 bool KD_TREE<PointType>::Criterion_Check(KD_TREE_NODE * root){
     if (root->TreeSize <= Minimal_Unbalanced_Tree_Size){
         return false;
@@ -1375,6 +1419,23 @@ float KD_TREE<PointType>::calc_dist(PointType a, PointType b){
     float dist = 0.0f;
     dist = (a.x-b.x)*(a.x-b.x) + (a.y-b.y)*(a.y-b.y) + (a.z-b.z)*(a.z-b.z);
     return dist;
+}
+
+template <typename PointType>
+float KD_TREE<PointType>::calc_heading(PointType a, PointType b){
+    float heading = 0.0f;
+    if( b.y - a.y < 0)
+    {
+        heading = 180 - asin((b.x - a.x)/sqrt(calc_dist(a,b))) *180/M_PI;
+    }
+    else{
+        heading = asin((b.x - a.x)/sqrt(calc_dist(a,b))) *180/M_PI;
+    }
+    if(heading > 180 && heading < 360 )
+    {
+        heading = heading -360;
+    }
+    return heading;
 }
 
 template <typename PointType>

@@ -210,6 +210,7 @@ private:
     void Search(KD_TREE_NODE * root, int k_nearest, PointType point, MANUAL_HEAP &q, double max_dist);//priority_queue<PointType_CMP>
     void Search_by_range(KD_TREE_NODE *root, BoxPointType boxpoint, PointVector &Storage);
     void Search_by_radius(KD_TREE_NODE *root, PointType point, float radius, PointVector &Storage);
+    void Search_by_sector(KD_TREE_NODE *root, PointType point, float radius, float heading, PointVector &Storage);
     bool Criterion_Check(KD_TREE_NODE * root);
     void Push_Down(KD_TREE_NODE * root);
     void Update(KD_TREE_NODE * root); 
@@ -217,6 +218,7 @@ private:
     void downsample(KD_TREE_NODE ** root);
     bool same_point(PointType a, PointType b);
     float calc_dist(PointType a, PointType b);
+    float calc_heading(PointType a, PointType b);
     float calc_box_dist(KD_TREE_NODE * node, PointType point);    
     static bool point_cmp_x(PointType a, PointType b); 
     static bool point_cmp_y(PointType a, PointType b); 

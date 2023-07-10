@@ -35,7 +35,9 @@
 #define MAX_SEARCH_RADIUS 2.0f
 
 using namespace std;
-using PointVector = KD_TREE<ikdTree_PointType>::PointVector;
+// using PointVector = KD_TREE<ikdTree_PointType>::PointVector;
+using PointVector = KD_TREE<PointType>::PointVector;
+
 
 // clang-format off
 POINT_CLOUD_REGISTER_POINT_STRUCT(RadarPointCloudType,
@@ -86,6 +88,8 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr tar(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudMap(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr downSizeFilterMap(new pcl::PointCloud<pcl::PointXYZI>);
 KD_TREE<pcl::PointXYZI> ikd_Tree(0.3, 0.6, 0.2);
+PointVector scan_map;
+
 
 Eigen::Vector3d t(para_t);
 Eigen::Vector4d pos({0, 0, 0, 1});
@@ -301,6 +305,8 @@ void main_task()
     if (!initialed)
     {
       pcl::copyPointCloud(*src, *tar);
+      ikd_Tree.Build(src->points);
+      ikd_Tree.set_downsample_param(0.5);
       initialed = true;
     }
     radar_update = radar_data_msg.header.stamp.toSec();
@@ -353,7 +359,10 @@ void main_task()
       {
         pointAssociateToMap(&src->points[i], &p_sel);
         RadarCloudMap->push_back(p_sel);
+        scan_map.push_back(p_sel);
+        
       }
+      ikd_Tree.Add_Points(scan_map,true);
     }
     pcl::VoxelGrid<pcl::PointXYZI> sor;
     sor.setInputCloud(RadarCloudMap);
