@@ -33,6 +33,7 @@
 #include "fast_gicp/gicp/fast_gicp_st.hpp"
 
 #define MAX_SEARCH_RADIUS 2.0f
+#define RADAR_RADIUS 200
 
 using namespace std;
 // using PointVector = KD_TREE<ikdTree_PointType>::PointVector;
@@ -85,6 +86,7 @@ double radar_update = 0;
 
 pcl::PointCloud<pcl::PointXYZI>::Ptr src(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr tar(new pcl::PointCloud<pcl::PointXYZI>);
+pcl::PointCloud<pcl::PointXYZI>::Ptr SubMap(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudMap(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr downSizeFilterMap(new pcl::PointCloud<pcl::PointXYZI>);
 KD_TREE<pcl::PointXYZI> ikd_Tree(0.3, 0.6, 0.2);
@@ -313,22 +315,6 @@ void main_task()
 
     queue_radar.pop();
 
-    // GICP
-
-    fast_gicp::FastGICPSingleThread<pcl::PointXYZI, pcl::PointXYZI> fgicp_st;
-    fgicp_st.clearTarget();
-    fgicp_st.clearSource();
-    fgicp_st.setInputTarget(tar);
-    fgicp_st.setInputSource(src);
-    fgicp_st.align(*Final);
-    auto t2 = std::chrono::high_resolution_clock::now();
-    double score = fgicp_st.getFitnessScore();
-
-    std::cout << "has converged:" << fgicp_st.hasConverged() << " score: " << fgicp_st.getFitnessScore() << std::endl;
-    std::cout << fgicp_st.getFinalTransformation() << std::endl;
-
-    Eigen::Matrix<double, 4, 4> icp_result = fgicp_st.getFinalTransformation().cast<double>();
-
     // t_w_curr = t_w_curr + q_w_curr * t_last_curr;
     // q_w_curr = q_w_curr * q_last_curr;
   }
@@ -363,12 +349,27 @@ void main_task()
         
       }
       ikd_Tree.Add_Points(scan_map,true);
+      ikd_Tree.Sector_Search(p_now,RADAR_RADIUS,heading,SubMap);
     }
     pcl::VoxelGrid<pcl::PointXYZI> sor;
     sor.setInputCloud(RadarCloudMap);
     sor.setLeafSize(0.05f, 0.05f, 0.05f);
     sor.filter(*downSizeFilterMap);
     queue_gt.pop();
+
+    // GICP
+    fast_gicp::FastGICPSingleThread<pcl::PointXYZI, pcl::PointXYZI> fgicp_st;
+    fgicp_st.clearTarget();
+    fgicp_st.clearSource();
+    fgicp_st.setInputTarget(SubMap);
+    fgicp_st.setInputSource(src);
+    fgicp_st.align(*Final);
+    double score = fgicp_st.getFitnessScore();
+
+    std::cout << "has converged:" << fgicp_st.hasConverged() << " score: " << fgicp_st.getFitnessScore() << std::endl;
+    std::cout << fgicp_st.getFinalTransformation() << std::endl;
+
+    Eigen::Matrix<double, 4, 4> icp_result = fgicp_st.getFinalTransformation().cast<double>();
 
   }
 

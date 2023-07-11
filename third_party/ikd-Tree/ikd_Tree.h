@@ -238,6 +238,7 @@ public:
     void Nearest_Search(PointType point, int k_nearest, PointVector &Nearest_Points, vector<float> & Point_Distance, double max_dist = INFINITY);
     void Box_Search(const BoxPointType &Box_of_Point, PointVector &Storage);
     void Radius_Search(PointType point, const float radius, PointVector &Storage);
+    void Sector_Search(PointType point, const float radius, const float heading, PointVector &Storage);
     int Add_Points(PointVector & PointToAdd, bool downsample_on);
     void Add_Point_Boxes(vector<BoxPointType> & BoxPoints);
     void Delete_Points(PointVector & PointToDel);

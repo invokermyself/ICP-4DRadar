@@ -412,6 +412,13 @@ void KD_TREE<PointType>::Radius_Search(PointType point, const float radius, Poin
 }
 
 template <typename PointType>
+void KD_TREE<PointType>::Sector_Search(PointType point, const float radius, const float heading, PointVector &Storage)
+{
+    Storage.clear();
+    Search_by_sector(Root_Node, point, radius, heading, Storage);
+}
+
+template <typename PointType>
 int KD_TREE<PointType>::Add_Points(PointVector & PointToAdd, bool downsample_on){
     int NewPointSize = PointToAdd.size();
     int tree_size = size();
@@ -1104,7 +1111,9 @@ void KD_TREE<PointType>::Search_by_sector(KD_TREE_NODE *root, PointType point, f
         flatten(root, Storage, NOT_RECORD);
         return;
     }
-    if (!root->point_deleted && calc_dist(root->point, point) <= radius * radius && fabs( calc_heading(root->point, point) - heading) < 60 ){
+    if (!root->point_deleted && \
+        calc_dist(root->point, point) <= radius * radius && \
+        (fabs( calc_heading(root->point, point) - heading) < 60 ) || (fabs( calc_heading(root->point, point) - heading) >300)){
         Storage.push_back(root->point);
     }
     if ((Rebuild_Ptr == nullptr) || root->left_son_ptr != *Rebuild_Ptr)
