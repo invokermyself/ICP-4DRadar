@@ -8,11 +8,12 @@ Panels:
         - /Status1
         - /Grid1
         - /Axes1
-        - /Path1/Offset1
+        - /Path1
         - /PointCloud23
         - /Odometry2
         - /Odometry2/Shape1
         - /Odometry2/Covariance1
+        - /PointCloud24
       Splitter Ratio: 0.5558823347091675
     Tree Height: 1248
   - Class: rviz/Selection
@@ -182,8 +183,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 5.9488606452941895
-        Min Value: -3.995584726333618
+        Max Value: 5.668851852416992
+        Min Value: -3.290640115737915
         Value: true
       Axis: Z
       Channel Name: z
@@ -224,7 +225,7 @@ Visualization Manager:
           Scale: 1
           Value: true
         Value: true
-      Enabled: true
+      Enabled: false
       Keep: 100
       Name: Odometry
       Position Tolerance: 0.10000000149011612
@@ -240,10 +241,38 @@ Visualization Manager:
         Value: Axes
       Topic: /lidar_gt
       Unreliable: false
+      Value: false
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: Intensity
+      Decay Time: 1
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Min Color: 0; 0; 0
+      Name: PointCloud2
+      Position Transformer: XYZ
+      Queue Size: 10
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.10000000149011612
+      Style: Flat Squares
+      Topic: /radar_submap
+      Unreliable: false
+      Use Fixed Frame: true
+      Use rainbow: true
       Value: true
   Enabled: true
   Global Options:
-    Background Color: 48; 48; 48
+    Background Color: 0; 0; 0
     Default Light: true
     Fixed Frame: camera_init
     Frame Rate: 30
@@ -269,25 +298,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 147.7475128173828
+      Distance: 130.16539001464844
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 2.594670534133911
-        Y: 49.3602180480957
-        Z: -30.405736923217773
+        X: -8.551030158996582
+        Y: 31.70337677001953
+        Z: -28.130144119262695
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.3197965621948242
+      Pitch: 1.5697963237762451
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 3.130361795425415
+      Yaw: 2.965360403060913
     Saved: ~
 Window Geometry:
   Displays:

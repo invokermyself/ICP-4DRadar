@@ -33,12 +33,11 @@
 #include "fast_gicp/gicp/fast_gicp_st.hpp"
 
 #define MAX_SEARCH_RADIUS 2.0f
-#define RADAR_RADIUS 200
+#define RADAR_RADIUS 80
 
 using namespace std;
 // using PointVector = KD_TREE<ikdTree_PointType>::PointVector;
 using PointVector = KD_TREE<PointType>::PointVector;
-
 
 // clang-format off
 POINT_CLOUD_REGISTER_POINT_STRUCT(RadarPointCloudType,
@@ -87,11 +86,10 @@ double radar_update = 0;
 pcl::PointCloud<pcl::PointXYZI>::Ptr src(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr tar(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr SubMap(new pcl::PointCloud<pcl::PointXYZI>);
+pcl::PointCloud<pcl::PointXYZI>::Ptr scan_map(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudMap(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr downSizeFilterMap(new pcl::PointCloud<pcl::PointXYZI>);
-KD_TREE<pcl::PointXYZI> ikd_Tree(0.3, 0.6, 0.2);
-PointVector scan_map;
-
+KD_TREE<pcl::PointXYZI> ikd_Tree(0.3, 0.6, 0.5);
 
 Eigen::Vector3d t(para_t);
 Eigen::Vector4d pos({0, 0, 0, 1});
@@ -106,6 +104,8 @@ Eigen::Vector3d t_w_curr(0, 0, 0);
 Eigen::Matrix<double, 3, 3> Rtrans;
 Eigen::Matrix<double, 3, 3> R_enu_radar;
 Eigen::MatrixXd currOdom;
+nav_msgs::Odometry RadarOdom;
+nav_msgs::Path RadarPath;
 
 bool initialed = false;
 std::mutex mutex_1;
@@ -116,6 +116,23 @@ std::queue<nav_msgs::Odometry> queue_gt;
 ImuDataStamped last_imu;
 ImuDataStamped imu_data;
 reve::RadarEgoVelocityEstimator radar_ego_velocity;
+
+static Eigen::Vector3d R2rpy(const Eigen::Matrix3d &R)
+{
+  Eigen::Vector3d n = R.col(0);
+  Eigen::Vector3d o = R.col(1);
+  Eigen::Vector3d a = R.col(2);
+
+  Eigen::Vector3d rpy(3);
+  double y = atan2(n(1), n(0));
+  double p = atan2(-n(2), n(0) * cos(y) + n(1) * sin(y));
+  double r = atan2(a(0) * sin(y) - a(1) * cos(y), -o(0) * sin(y) + o(1) * cos(y));
+  rpy(0) = r;
+  rpy(1) = p;
+  rpy(2) = y;
+
+  return rpy / M_PI * 180.0;
+}
 
 void pointAssociateToMap(PointType const *const pi, PointType *const po)
 {
@@ -198,6 +215,8 @@ int main(int argc, char **argv)
   ros::init(argc, argv, "radar_odometry");
   ros::NodeHandle n("~");
   ros::Publisher pubRadarCloudSurround = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_surround", 100);
+  ros::Publisher pubRadarSubMap = n.advertise<sensor_msgs::PointCloud2>("/radar_submap", 100);
+  ros::Publisher pubRadarPath = n.advertise<nav_msgs::Path>("/radar_path", 5);
   ros::Publisher pubOdomGT = n.advertise<nav_msgs::Odometry>("/lidar_gt", 100);
   radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig config;
   config_init(config);
@@ -216,8 +235,10 @@ int main(int argc, char **argv)
   ros::Rate r(100.0);
 
   R_enu_radar << 0.000796, -1, 0,
-  1, 0.000796, 0,
-  0, 0, 1;
+      1, 0.000796, 0,
+      0, 0, 1;
+
+  currOdom = Eigen::Matrix<double, 4, 4>::Identity();
 
   // read bag
   rosbag::Bag source_bag;
@@ -251,7 +272,7 @@ int main(int argc, char **argv)
     else if (topic == topic_lidar_gt)
     {
       const auto gt_pose = m.instantiate<nav_msgs::Odometry>();
-      
+
       if (gt_pose != NULL)
       {
         gt_pose->header.frame_id = "/camera_init";
@@ -269,12 +290,28 @@ int main(int argc, char **argv)
     RadarCloudSurround.header.stamp = ros::Time().now();
     RadarCloudSurround.header.frame_id = "/camera_init";
     pubRadarCloudSurround.publish(RadarCloudSurround);
+
+    sensor_msgs::PointCloud2 RadarSubMap;
+    pcl::toROSMsg(*SubMap, RadarSubMap);
+    RadarSubMap.header.stamp = ros::Time().now();
+    RadarSubMap.header.frame_id = "/camera_init";
+    pubRadarSubMap.publish(RadarSubMap);
+
+    geometry_msgs::PoseStamped RadarPose;
+    RadarPose.pose = RadarOdom.pose.pose;
+    RadarPath.header.stamp = ros::Time().now();
+    RadarPath.header.frame_id = "/camera_init";
+    RadarPath.poses.push_back(RadarPose);
+    pubRadarPath.publish(RadarPath);
+
+    SubMap->clear();
   }
 }
 
 void main_task()
 {
   pcl::PointCloud<pcl::PointXYZI>::Ptr Final(new pcl::PointCloud<pcl::PointXYZI>);
+
   mutex_1.lock();
 
   if (!queue_radar.empty())
@@ -334,9 +371,12 @@ void main_task()
     q_w_curr.y() = gt_msg.pose.pose.orientation.y;
     q_w_curr.z() = gt_msg.pose.pose.orientation.z;
     q_w_curr.w() = gt_msg.pose.pose.orientation.w;
-    Rtrans = R_enu_radar*q_w_curr.toRotationMatrix();
+    Rtrans = q_w_curr.toRotationMatrix() * R_enu_radar;
+    currOdom.topLeftCorner<3,3>() = Rtrans;
+    currOdom.topRightCorner<3,1>() = t_w_curr;
     gt_update = gt_msg.header.stamp.toSec();
     double time_diff = gt_update - radar_update;
+    double heading = R2rpy(q_w_curr.toRotationMatrix())(2);
     if (time_diff < 0.1)
     {
       size_t PointNum = src->size();
@@ -345,32 +385,49 @@ void main_task()
       {
         pointAssociateToMap(&src->points[i], &p_sel);
         RadarCloudMap->push_back(p_sel);
-        scan_map.push_back(p_sel);
-        
+        scan_map->push_back(p_sel);
       }
-      ikd_Tree.Add_Points(scan_map,true);
-      ikd_Tree.Sector_Search(p_now,RADAR_RADIUS,heading,SubMap);
+      ikd_Tree.Add_Points(scan_map->points, false);
+      
+      pcl::PointXYZI p_now;
+      p_now.x = t_w_curr(0);
+      p_now.y = t_w_curr(1);
+      p_now.z = t_w_curr(2);
+      ikd_Tree.Sector_Search(p_now, RADAR_RADIUS, heading, SubMap->points);
+
+      // GICP
+      fast_gicp::FastGICPSingleThread<pcl::PointXYZI, pcl::PointXYZI> fgicp_st;
+      fgicp_st.clearTarget();
+      fgicp_st.clearSource();
+      fgicp_st.setInputTarget(SubMap);
+      fgicp_st.setInputSource(scan_map);
+      fgicp_st.setCorrespondenceRandomness(5);
+      fgicp_st.align(*Final);
+      double score = fgicp_st.getFitnessScore();
+
+      std::cout << "has converged:" << fgicp_st.hasConverged() << " score: " << fgicp_st.getFitnessScore() << std::endl;
+      std::cout << fgicp_st.getFinalTransformation() << std::endl;
+
+      Eigen::Matrix<double, 4, 4> icp_result = fgicp_st.getFinalTransformation().cast<double>();
+      currOdom = icp_result * currOdom;
+
+      RadarOdom.pose.pose.position.x = currOdom(0,3);
+      RadarOdom.pose.pose.position.y = currOdom(1,3);
+      RadarOdom.pose.pose.position.z = currOdom(2,3);
+      Eigen::Quaterniond q_tmp(currOdom.topLeftCorner<3,3>());
+      RadarOdom.pose.pose.orientation.w = q_tmp.w();
+      RadarOdom.pose.pose.orientation.x = q_tmp.x();
+      RadarOdom.pose.pose.orientation.y = q_tmp.y();
+      RadarOdom.pose.pose.orientation.z = q_tmp.z();
+
+      scan_map->clear();
     }
+
     pcl::VoxelGrid<pcl::PointXYZI> sor;
     sor.setInputCloud(RadarCloudMap);
-    sor.setLeafSize(0.05f, 0.05f, 0.05f);
+    sor.setLeafSize(0.5f, 0.5f, 0.5f);
     sor.filter(*downSizeFilterMap);
     queue_gt.pop();
-
-    // GICP
-    fast_gicp::FastGICPSingleThread<pcl::PointXYZI, pcl::PointXYZI> fgicp_st;
-    fgicp_st.clearTarget();
-    fgicp_st.clearSource();
-    fgicp_st.setInputTarget(SubMap);
-    fgicp_st.setInputSource(src);
-    fgicp_st.align(*Final);
-    double score = fgicp_st.getFitnessScore();
-
-    std::cout << "has converged:" << fgicp_st.hasConverged() << " score: " << fgicp_st.getFitnessScore() << std::endl;
-    std::cout << fgicp_st.getFinalTransformation() << std::endl;
-
-    Eigen::Matrix<double, 4, 4> icp_result = fgicp_st.getFinalTransformation().cast<double>();
-
   }
 
   mutex_1.unlock();
