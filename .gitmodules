@@ -1,0 +1,6 @@
+[submodule "reve"]
+	path = reve
+	url = https://github.com/christopherdoer/reve.git
+[submodule "fast_gicp"]
+	path = fast_gicp
+	url = https://github.com/SMRT-AIST/fast_gicp
