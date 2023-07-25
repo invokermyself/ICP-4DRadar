@@ -3,14 +3,15 @@
     <arg name="config" default="params_demo_dataset"/>
     
     <node name="radar_odometry" pkg="odometry_4dradar" type="radar_odometry" output="screen"> 
-        <param name="bag_path" type="string" value="/media/invoker/Toshiba_1T/ColoDataset/edgar_classroom_run0.bag" />
-        <param name="topic_imu" type="string" value="/gx5/imu/data" />
-        <param name="topic_radar_scan" type="string" value="/mmWaveDataHdl/RScan" />
+        <param name="bag_path" type="string" value="/media/invoker/Toshiba_1T/experiment-20221212/round_2/line_1_2022-12-12-09-58-34.bag" />
+        <param name="topic_imu" type="string" value="/imu/data" />
+        <param name="topic_radar_scan" type="string" value="/radar_enhanced_pcl" />
         <param name="topic_lidar_gt" type="string" value="/lidar_ground_truth" />
+        <param name="topic_gps_gt" type="string" value="/gps_fix" />
         <rosparam file="$(find odometry_4dradar)/config/$(arg config).yaml" command="load"/>
     </node>
 
     <!-- 在rviz中显示-->
-    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find odometry_4dradar)/rviz/radar.rviz" required="true" />
+    <!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find odometry_4dradar)/rviz/radar.rviz" required="true" /> -->
 
 </launch>

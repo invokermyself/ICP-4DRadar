@@ -1,12 +1,15 @@
-# need to change
 
-    radar_odom_path
-    radar_featurelast_path
-    radar_featurecurr_path
+# Radar Odometry
 
-# how to use
-    roslaunch odometry_4dradar radar_odometry.launch
+## need to change
 
-# results file
-    radar_odometry.txt
-     
+param in radar_odometry.launch
+R_enu_radar: trans from radar to body(eg. 右前上)
+
+## how to use
+
+roslaunch odometry_4dradar radar_odometry.launch
+
+## output
+
+topic:"/radar_path","/radar_vel"
