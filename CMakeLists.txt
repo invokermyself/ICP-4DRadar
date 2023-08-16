@@ -22,6 +22,7 @@ find_package(catkin REQUIRED COMPONENTS
 find_package(PCL 1.8 REQUIRED)
 find_package(Boost REQUIRED COMPONENTS thread)
 find_package(Ceres REQUIRED)
+FIND_PACKAGE(GTSAM REQUIRED)
 
 include_directories(
     include
@@ -30,6 +31,7 @@ include_directories(
     ${PCL_INCLUDE_DIRS}
     ${Boost_INCLUDE_DIRS}
     ${CERES_INCLUDE_DIRS}
+    ${GTSAM_INCLUDE_DIR}
 )
 
 catkin_package(
@@ -46,4 +48,4 @@ add_executable(icp4radar src/iterative_closest_point.cpp third_party/ikd-Tree/ik
 add_executable(radar_odometry src/radar_odometry.cpp third_party/ikd-Tree/ikd_Tree.cpp)
 
 target_link_libraries(icp4radar ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${Boost_LIBRARIES})
-target_link_libraries(radar_odometry ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${Boost_LIBRARIES} ${CERES_LIBRARIES})
+target_link_libraries(radar_odometry ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${Boost_LIBRARIES} ${CERES_LIBRARIES} -lgtsam)

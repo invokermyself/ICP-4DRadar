@@ -36,12 +36,29 @@
 #include "fast_gicp/gicp/fast_gicp.hpp"
 #include "fast_gicp/gicp/fast_gicp_st.hpp"
 
+#include <gtsam/navigation/CombinedImuFactor.h>
+#include <gtsam/navigation/RadarFactor.h>
+#include <gtsam/navigation/GPSFactor.h>
+#include <gtsam/navigation/ImuFactor.h>
+#include <gtsam/slam/dataset.h>
+#include <gtsam/slam/BetweenFactor.h>
+#include <gtsam/slam/PriorFactor.h>
+#include <gtsam/slam/dataset.h>
+#include <gtsam/nonlinear/LevenbergMarquardtParams.h>
+#include <gtsam/nonlinear/NonlinearFactorGraph.h>
+#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
+#include <gtsam/inference/Symbol.h>
+
 #define MAX_SEARCH_RADIUS 2.0f
 #define RADAR_RADIUS 80
 
 using namespace std;
 // using PointVector = KD_TREE<ikdTree_PointType>::PointVector;
 using PointVector = KD_TREE<PointType>::PointVector;
+using namespace gtsam;
+using symbol_shorthand::B; // 陀螺仪残差  (ax,ay,az,gx,gy,gz)
+using symbol_shorthand::V; // 用表示      速度导数(xdot,ydot,zdot)
+using symbol_shorthand::X; // 用作表示    姿态(x,y,z,r,p,y)
 
 // clang-format off
 POINT_CLOUD_REGISTER_POINT_STRUCT(RadarPointCloudType,
@@ -93,6 +110,7 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr SubMap(new pcl::PointCloud<pcl::PointXYZI>)
 pcl::PointCloud<pcl::PointXYZI>::Ptr scan_map(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudMap(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr downSizeFilterMap(new pcl::PointCloud<pcl::PointXYZI>);
+NonlinearFactorGraph *graph = new NonlinearFactorGraph();
 KD_TREE<pcl::PointXYZI> ikd_Tree(0.3, 0.6, 0.5);
 
 Eigen::Vector3d t(para_t);
