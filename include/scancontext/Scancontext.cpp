@@ -369,8 +369,8 @@ std::pair<int, float> SCManager::detectLoopClosureID ( void )
 
     auto curr_key = polarcontext_invkeys_mat_.back(); // current observation (query)
     auto curr_desc = polarcontexts_.back(); // current observation (query)
-    lcd.setf(std::ios::dec, std::ios::floatfield);
-    lcd.precision(8);
+    // lcd.setf(std::ios::dec, std::ios::floatfield);
+    // lcd.precision(8);
 
     /* 
      * step 1: candidates from ringkey tree_
@@ -442,14 +442,14 @@ std::pair<int, float> SCManager::detectLoopClosureID ( void )
         // std::cout.precision(3); 
         cout << "[Loop found] Nearest distance: " << min_dist << " btn " << polarcontexts_.size()-1 << " and " << nn_idx << "." << endl;
         // cout << "[Loop found] yaw diff: " << nn_align * PC_UNIT_SECTORANGLE << " deg." << endl;
-        lcd << polarcontexts_.size()-1 << ' ' << nn_idx << ' ' << min_dist << std::endl;
+        // lcd << polarcontexts_.size()-1 << ' ' << nn_idx << ' ' << min_dist << std::endl;
     }
     else
     {
         std::cout.precision(3); 
         cout << "[Not loop] Nearest distance: " << min_dist << " btn " << polarcontexts_.size()-1 << " and " << nn_idx << "." << endl;
         // cout << "[Not loop] yaw diff: " << nn_align * PC_UNIT_SECTORANGLE << " deg." << endl;
-        lcd << polarcontexts_.size()-1 << ' ' << nn_idx << ' ' << min_dist << std::endl;
+        // lcd << polarcontexts_.size()-1 << ' ' << nn_idx << ' ' << min_dist << std::endl;
     }
 
     // To do: return also nn_align (i.e., yaw diff)

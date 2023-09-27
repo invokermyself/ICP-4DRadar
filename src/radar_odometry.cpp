@@ -3,6 +3,10 @@
 #include <random>
 #include <thread>
 #include <unistd.h>
+#include <optional>
+#include <mutex>
+#include <queue>
+
 #include <x86_64-linux-gnu/sys/stat.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/io/ply_io.h>
@@ -19,6 +23,8 @@
 #include <nav_msgs/Path.h>
 #include <gps_common/GPSFix.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <ld_msgs/ld_can.h>
+
 #include <ros/ros.h>
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
@@ -26,7 +32,7 @@
 #include <Eigen/Geometry>
 #include <Eigen/Dense>
 #include <boost/thread/thread.hpp>
-#include <mutex>
+
 
 #include <pcl/pcl_macros.h>
 #include "userdefine.h"
@@ -38,6 +44,7 @@
 #include "fast_gicp/gicp/fast_gicp_st.hpp"
 #include "aloam_velodyne/tic_toc.h"
 #include "aloam_velodyne/common.h"
+#include "scancontext/Scancontext.h"
 
 #include <gtsam/navigation/CombinedImuFactor.h>
 #include <gtsam/navigation/RadarFactor.h>
@@ -51,6 +58,7 @@
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 #include <gtsam/inference/Symbol.h>
+#include <gtsam/nonlinear/ISAM2.h>
 
 #define MAX_SEARCH_RADIUS 2.0f
 #define RADAR_RADIUS 80
@@ -113,12 +121,7 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr SubMap(new pcl::PointCloud<pcl::PointXYZI>)
 pcl::PointCloud<pcl::PointXYZI>::Ptr scan_map(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudMap(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr downSizeFilterMap(new pcl::PointCloud<pcl::PointXYZI>);
-NonlinearFactorGraph *graph = new NonlinearFactorGraph();
-KD_TREE<pcl::PointXYZI> ikd_Tree(0.3, 0.6, 0.5);
-pcl::VoxelGrid<PointType> downSizeFilterICP;
-std::vector<pcl::PointCloud<PointType>::Ptr> keyframeLaserClouds;
-std::vector<Pose6D> keyframePoses;
-std::vector<Pose6D> keyframePosesUpdated;
+
 
 Eigen::Vector3d t(para_t);
 Eigen::Vector4d pos({0, 0, 0, 1});
@@ -126,31 +129,72 @@ Eigen::Vector4d pos({0, 0, 0, 1});
 Eigen::Map<Eigen::Quaterniond> q_last_curr(para_q);
 Eigen::Map<Eigen::Vector3d> t_last_curr(para_t);
 
+// odometry
 // Transformation from current frame to world frame
 Eigen::Quaterniond q_w_curr(1, 0, 0, 0);
 Eigen::Vector3d t_w_curr(0, 0, 0);
 Vector3 v_r, sigma_v_r;
 Vector3 gyro_last;
 Vector3 lbr (0.0901, -0.1449, 0.0249); //colo
+// 初始化值
+
+int vel_correction_count = 0;
+int icp_correction_count = 0;
+std::queue<Pose3> odomBuf;
+std::queue<pcl::PointCloud<PointType>::Ptr> fullResBuf;
 
 Eigen::Matrix<double, 3, 3> Rtrans;
 Eigen::Matrix<double, 3, 3> R_enu_radar;
+Eigen::Matrix<double, 4, 4> T_enu_radar;
 Eigen::MatrixXd currOdom;
 nav_msgs::Odometry RadarOdom;
 nav_msgs::Path RadarPath;
 
+//loop detect
+std::mutex mKF;
+std::mutex mBuf;
+SCManager scManager;
+std::queue<std::pair<int, int> > scLoopICPBuf;
+pcl::VoxelGrid<PointType> downSizeFilterICP;
+pcl::VoxelGrid<PointType> downSizeFilterScancontext;
+std::vector<pcl::PointCloud<PointType>::Ptr> keyframeLaserClouds;
+std::vector<std::pair<int,Pose6D>> keyframePoses;
+std::vector<std::pair<int,Pose6D>> keyframePosesUpdated;
+Pose6D odom_pose_prev {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init 
+Pose6D odom_pose_curr {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init pose is zero 
+double keyframeMeterGap;
+double movementAccumulation = 1000000.0; // large value means must add the first given frame.
+bool isNowKeyFrame = false;
+
+
+//rosbag
 bool initialed = false;
 std::mutex mutex_1;
-std::mutex mKF;
-
 std::queue<ImuDataStamped> queue_imu;
 std::queue<sensor_msgs::PointCloud2> queue_radar;
 std::queue<nav_msgs::Odometry> queue_gt;
 std::queue<gps_common::GPSFix> queue_gps;
+
+//pose graph
+NonlinearFactorGraph *graph = new NonlinearFactorGraph();
+gtsam::ISAM2 *isam;
+gtsam::Values isamCurrentEstimate;
+Values initial_values;
 ImuDataStamped last_imu;
 ImuDataStamped imu_data;
 reve::RadarEgoVelocityEstimator radar_ego_velocity;
 PreintegrationType *imu_preintegrated_;
+imuBias::ConstantBias prev_bias;
+Values result;
+NavState prev_state;
+NavState prop_state;
+std::mutex mtxPosegraph;
+std::mutex mtxRecentPose;
+std::string bag_path;
+std::string topic_imu;
+std::string topic_radar_scan;
+std::string topic_lidar_gt;
+std::string topic_gps_gt;
 
 ros::Publisher pubRadarCloudSurround;
 ros::Publisher pubRadarSubMap;
@@ -174,6 +218,16 @@ static Eigen::Vector3d R2rpy(const Eigen::Matrix3d &R)
 
   return rpy / M_PI * 180.0;
 }
+
+static double degree2rad(double theta)
+{
+    return theta * M_PI / 180.0;
+}
+
+double transDiff(const Pose6D& _p1, const Pose6D& _p2)
+{
+    return sqrt( (_p1.x - _p2.x)*(_p1.x - _p2.x) + (_p1.y - _p2.y)*(_p1.y - _p2.y) + (_p1.z - _p2.z)*(_p1.z - _p2.z) );
+} // transDiff
 
 void pointAssociateToMap(PointType const *const pi, PointType *const po)
 {
@@ -256,6 +310,18 @@ gtsam::Pose3 Pose6DtoGTSAMPose3(const Pose6D& p)
     return gtsam::Pose3( gtsam::Rot3::RzRyRx(p.roll, p.pitch, p.yaw), gtsam::Point3(p.x, p.y, p.z) );
 } // Pose6DtoGTSAMPose3
 
+Pose6D GTSAMPose3toPose6D(const gtsam::Pose3& p)
+{
+  Pose6D rtval;
+  rtval.x = p.x();
+  rtval.y = p.y();
+  rtval.z = p.z();
+  rtval.roll = p.rotation().roll();
+  rtval.pitch = p.rotation().pitch();
+  rtval.yaw = p.rotation().yaw();
+  return rtval;
+} // GTSAMPose3toPose6D
+
 pcl::PointCloud<PointType>::Ptr local2global(const pcl::PointCloud<PointType>::Ptr &cloudIn, const Pose6D& tf)
 {
     pcl::PointCloud<PointType>::Ptr cloudOut(new pcl::PointCloud<PointType>());
@@ -281,6 +347,7 @@ pcl::PointCloud<PointType>::Ptr local2global(const pcl::PointCloud<PointType>::P
 
 void initNoises( void )
 {
+  Eigen::Matrix<double, 9, 1> initial_state = Eigen::Matrix<double, 9, 1>::Zero();
   Point3 prior_point(initial_state.head<3>());
   Vector3 prior_euler(initial_state.segment<3>(3));
   Vector3 prior_velocity(initial_state.tail<3>());
@@ -299,16 +366,12 @@ void initNoises( void )
   init2nav_Trans.topRightCorner<3, 1>() = bTn;
   init2nav_Trans(3, 3) = 1;
 
-  // 初始化值
-  Values initial_values;
-  int correction_count = 0;
-  int icp_correction_count = 0;
   // 位姿
-  initial_values.insert(X(correction_count), prior_pose);
+  initial_values.insert(X(vel_correction_count), prior_pose);
   // 速度
-  initial_values.insert(V(correction_count), prior_velocity);
+  initial_values.insert(V(vel_correction_count), prior_velocity);
   // 残差
-  initial_values.insert(B(correction_count), prior_imu_bias);
+  initial_values.insert(B(vel_correction_count), prior_imu_bias);
   cout << "initial state:\n"
        << initial_state.transpose() << endl;
   // 设置噪声模型
@@ -319,9 +382,9 @@ void initNoises( void )
   noiseModel::Diagonal::shared_ptr velocity_noise_model = noiseModel::Isotropic::Sigma(3, 0.1);
   noiseModel::Diagonal::shared_ptr bias_noise_model = noiseModel::Isotropic::Sigma(6, 0.001);
   NonlinearFactorGraph *graph = new NonlinearFactorGraph();
-  graph->add(PriorFactor<Pose3>(X(correction_count), prior_pose, pose_noise_model));
-  graph->add(PriorFactor<Vector3>(V(correction_count), prior_velocity, velocity_noise_model));
-  graph->add(PriorFactor<imuBias::ConstantBias>(B(correction_count), prior_imu_bias, bias_noise_model));
+  graph->add(PriorFactor<Pose3>(X(vel_correction_count), prior_pose, pose_noise_model));
+  graph->add(PriorFactor<Vector3>(V(vel_correction_count), prior_velocity, velocity_noise_model));
+  graph->add(PriorFactor<imuBias::ConstantBias>(B(vel_correction_count), prior_imu_bias, bias_noise_model));
   // 使用传感器信息构建IMU的噪声模型
   double accel_noise_sigma = 0.00049;
   double gyro_noise_sigma = 0.0000174444;
@@ -357,9 +420,10 @@ void initNoises( void )
   imu_preintegrated_ = new PreintegratedImuMeasurements(p, prior_imu_bias);
 #endif
   // 保存上一次的imu积分值和结果
-  NavState prev_state(prior_pose, prior_velocity);
-  NavState prop_state = prev_state;
-  imuBias::ConstantBias prev_bias = prior_imu_bias; //
+  NavState state_tmp(prior_pose,prior_velocity);
+  prev_state = state_tmp;
+  prop_state = prev_state;
+  prev_bias = prior_imu_bias; //
 }
 
 void process_viz_map()
@@ -387,7 +451,7 @@ void process_viz_map()
 
 void process_viz_path(void)
 {
-    float hz = 5.0;
+    float hz = 10.0;
     ros::Rate rate(hz);
     
     while (ros::ok()) {
@@ -419,66 +483,28 @@ void process_viz_path(void)
     }
 }
 
-void loopFindNearKeyframesCloud( pcl::PointCloud<PointType>::Ptr& nearKeyframes, const int& key, const int& submap_size, const int& root_idx)
+void performSCLoopClosure(void)
 {
-    // extract and stacking near keyframes (in global coord)
-    nearKeyframes->clear();
-    for (int i = -submap_size; i <= submap_size; ++i) {
-        int keyNear = key + i;
-        if (keyNear < 0 || keyNear >= keyframeLaserClouds.size() )
-            continue;
-
-        mKF.lock();
-        *nearKeyframes += * local2global(keyframeLaserClouds[keyNear], keyframePosesUpdated[root_idx]);
-        mKF.unlock();
-    }
-
-    if (nearKeyframes->empty())
+    if( keyframePoses.size() < scManager.NUM_EXCLUDE_RECENT) // do not try too early 
         return;
 
-    // downsample near keyframes
-    pcl::PointCloud<PointType>::Ptr cloud_temp(new pcl::PointCloud<PointType>());
-    downSizeFilterICP.setInputCloud(nearKeyframes);
-    downSizeFilterICP.filter(*cloud_temp);
-    *nearKeyframes = *cloud_temp;
-} // loopFindNearKeyframesCloud
+    auto detectResult = scManager.detectLoopClosureID(); // first: nn index, second: yaw diff
+    int SCclosestHistoryFrameID = detectResult.first;
+    if( SCclosestHistoryFrameID != -1 ) { 
+        const int prev_node_idx = SCclosestHistoryFrameID;
+        const int curr_node_idx = keyframePoses.size() - 1; // because cpp starts 0 and ends n-1
+        cout << "Loop detected! - between " << prev_node_idx << " and " << curr_node_idx << "" << endl;
 
+        mBuf.lock();
+        scLoopICPBuf.push(std::pair<int, int>(prev_node_idx, curr_node_idx));
+        // addding actual 6D constraints in the other thread, icp_calculation.
+        mBuf.unlock();
+    }
+} // performSCLoopClosure
 
-int main(int argc, char **argv)
+void process_odom()
 {
-
-  ros::init(argc, argv, "radar_odometry");
-  ros::NodeHandle n("~");
-  pubRadarCloudSurround = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_surround", 100);
-  pubRadarSubMap = n.advertise<sensor_msgs::PointCloud2>("/radar_submap", 100);
-  pubRadarPath = n.advertise<nav_msgs::Path>("/radar_path", 5);
-  pubRadarVel = n.advertise<geometry_msgs::Twist>("/radar_vel", 5);
-  pubOdomGT = n.advertise<nav_msgs::Odometry>("/lidar_gt", 100);
-  radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig config;
-  config_init(config);
-  radar_ego_velocity.configure(config);
-  std::size_t order = 1;
-
-  std::string bag_path;
-  std::string topic_imu;
-  std::string topic_radar_scan;
-  std::string topic_lidar_gt;
-  std::string topic_gps_gt;
-  n.getParam("bag_path", bag_path);
-  n.getParam("topic_imu", topic_imu);
-  n.getParam("topic_radar_scan", topic_radar_scan);
-  n.getParam("topic_lidar_gt", topic_lidar_gt);
-  n.getParam("topic_gps_gt", topic_gps_gt);
-
-  ros::Rate r(100.0);
-
-  R_enu_radar << 0.000796, -1, 0,
-      1, 0.000796, 0,
-      0, 0, 1;
-
-  currOdom = Eigen::Matrix<double, 4, 4>::Identity();
-
-  // read bag
+    // read bag
   rosbag::Bag source_bag;
   source_bag.open(bag_path, rosbag::bagmode::Read);
   std::vector<std::string> topics;
@@ -488,16 +514,38 @@ int main(int argc, char **argv)
   topics.push_back(topic_gps_gt);
 
   rosbag::View view(source_bag, rosbag::TopicQuery(topics));
-
+  sensor_msgs::ImuPtr imu_msg_new(new sensor_msgs::Imu);
   for (const rosbag::MessageInstance &m : view)
   {
     const auto topic = m.getTopic();
     if (topic == topic_imu)
     {
-      const auto imu_msg_bag = m.instantiate<sensor_msgs::Imu>();
-      if (imu_msg_bag != NULL)
+      // const auto imu_msg_bag = m.instantiate<sensor_msgs::Imu>();
+      const auto imu_msg_bag = m.instantiate<ld_msgs::ld_can>();
+      bool Imu_update = false;
+      if (imu_msg_bag != NULL && imu_msg_bag->ID == 0x605)
       {
-        callbackIMU(imu_msg_bag);
+        imu_msg_new->header = imu_msg_bag->header;
+        double ax = (int16_t)((imu_msg_bag->DATA[1] <<8) + imu_msg_bag->DATA[0]) * 0.01;
+        double ay = (int16_t)((imu_msg_bag->DATA[3] <<8) + imu_msg_bag->DATA[2]) * 0.01;
+        double az = (int16_t)((imu_msg_bag->DATA[5] <<8) + imu_msg_bag->DATA[4]) * 0.01;
+        imu_msg_new->linear_acceleration.x = ax;
+        imu_msg_new->linear_acceleration.y = ay;
+        imu_msg_new->linear_acceleration.z = az;
+      }
+      else if(imu_msg_bag != NULL && imu_msg_bag->ID == 0x608)
+      {
+        double wx = (int16_t)((imu_msg_bag->DATA[1] <<8) + imu_msg_bag->DATA[0]) * (0.01*M_PI/180.0f);
+        double wy = (int16_t)((imu_msg_bag->DATA[3] <<8) + imu_msg_bag->DATA[2]) * (0.01*M_PI/180.0f);
+        double wz = (int16_t)((imu_msg_bag->DATA[5] <<8) + imu_msg_bag->DATA[4]) * (0.01*M_PI/180.0f);
+        imu_msg_new->angular_velocity.x = wx;
+        imu_msg_new->angular_velocity.y = wy;
+        imu_msg_new->angular_velocity.z = wz;
+        Imu_update = true;
+      }
+      if (Imu_update)
+      {
+        callbackIMU(imu_msg_new);
       }
     }
 
@@ -531,11 +579,327 @@ int main(int argc, char **argv)
         callbackGPSPose(gps_pose);
       }
     }
-
-    ros::spinOnce();
     main_task();
   }
 }
+
+void process_pg()
+{
+  int odom_node = 0;
+  while (1)
+  {
+    while (!odomBuf.empty() && !fullResBuf.empty())
+    {
+      //
+      // pop and check keyframe is or not
+      //
+      mBuf.lock();
+      while (!odomBuf.empty())
+        odomBuf.pop();
+      if (odomBuf.empty())
+      {
+        mBuf.unlock();
+        break;
+      }
+
+      // Time equal check
+
+      // TODO
+
+      pcl::PointCloud<PointType>::Ptr thisKeyFrame(new pcl::PointCloud<PointType>());
+      pcl::copyPointCloud(*fullResBuf.front(),*thisKeyFrame);
+      fullResBuf.pop();
+
+      Pose6D pose_curr = GTSAMPose3toPose6D(odomBuf.front());
+      odomBuf.pop();
+      odom_node++;
+
+      //
+      // Early reject by counting local delta movement (for equi-spereated kf drop)
+      //
+      odom_pose_prev = odom_pose_curr;
+      odom_pose_curr = pose_curr;
+      double delta_translation = transDiff(odom_pose_prev, odom_pose_curr);
+      movementAccumulation += delta_translation;
+
+      if (movementAccumulation > keyframeMeterGap)
+      {
+        isNowKeyFrame = true;
+        movementAccumulation = 0.0; // reset
+      }
+      else
+      {
+        isNowKeyFrame = false;
+      }
+
+      if (!isNowKeyFrame)
+        continue;
+
+      // delete outlier by KNN
+      pcl::KdTreeFLANN<pcl::PointXYZI> KNNkdtree;
+      KNNkdtree.setInputCloud(thisKeyFrame);
+      float radius = 1;
+      for (int i = 0; i < thisKeyFrame->size(); i++)
+      {
+        std::vector<int> pointIndxRadiusSearch;
+        std::vector<float> pointNRSquareDis;
+        int size = KNNkdtree.radiusSearch(thisKeyFrame->points[i], radius, pointIndxRadiusSearch, pointNRSquareDis);
+        if (size <= 15)
+        {
+          thisKeyFrame->erase(thisKeyFrame->begin() + i);
+        }
+      }
+
+      //
+      // Save data and Add consecutive node
+      //
+      pcl::PointCloud<PointType>::Ptr thisKeyFrameDS(new pcl::PointCloud<PointType>());
+      downSizeFilterScancontext.setInputCloud(thisKeyFrame);
+      downSizeFilterScancontext.filter(*thisKeyFrameDS);
+
+      mKF.lock();
+      keyframeLaserClouds.push_back(thisKeyFrameDS);
+      // std::stringstream filepath;
+      // filepath << "/home/invoker/catkin_ws/src/navtech-radar-slam/keyframe/" << keyframeLaserClouds.size() - 1 << ".pcd";
+      // pcl::io::savePCDFileASCII(filepath.str(), *thisKeyFrameDS);
+      keyframePoses.push_back(std::pair(odom_node,pose_curr));
+      keyframePosesUpdated.push_back(std::pair(odom_node,pose_curr)); // init
+      scManager.makeAndSaveScancontextAndKeys(*thisKeyFrameDS);
+      mKF.unlock();
+      const int prev_node_idx = keyframePoses.size() - 2;
+      const int curr_node_idx = keyframePoses.size() - 1; // becuase cpp starts with 0 (actually this index could be any number, but for simple implementation, we follow sequential indexing)
+      // gtsam::Pose3 poseFrom = Pose6DtoGTSAMPose3(keyframePoses.at(prev_node_idx).second);
+      // gtsam::Pose3 poseTo = Pose6DtoGTSAMPose3(keyframePoses.at(curr_node_idx).second);
+
+      if (curr_node_idx % 5 == 0)
+        cout << "posegraph keyframe node " << curr_node_idx << " added." << endl;
+    }
+    // if want to print the current graph, use gtSAMgraph.print("\nFactor Graph:\n");
+  
+
+        // ps.
+        // scan context detector is running in another thread (in constant Hz, e.g., 1 Hz)
+        // pub path and point cloud in another thread
+
+        // wait (must required for running the while loop)
+        std::chrono::milliseconds dura(2);
+        std::this_thread::sleep_for(dura);
+    }
+} // process_pg
+
+void process_lcd(void)
+{
+    float loopClosureFrequency = 1.0; // can change
+    ros::Rate rate(loopClosureFrequency);
+    while (ros::ok())
+    {
+        rate.sleep();
+        performSCLoopClosure();
+        // performRSLoopClosure(); // TODO
+    }
+} // process_lcd
+
+void updatePoses(void)
+{
+    mKF.lock();
+    for (int key_idx,node_idx=0; node_idx < int(initial_values.size()); node_idx++)
+    {
+      if(node_idx == keyframePosesUpdated[key_idx].first && key_idx < int(keyframePosesUpdated.size()))
+      {
+        Pose6D& p = keyframePosesUpdated[key_idx].second;
+        p.x = initial_values.at<gtsam::Pose3>(node_idx).translation().x();
+        p.y = initial_values.at<gtsam::Pose3>(node_idx).translation().y();
+        p.z = initial_values.at<gtsam::Pose3>(node_idx).translation().z();
+        p.roll = initial_values.at<gtsam::Pose3>(node_idx).rotation().roll();
+        p.pitch = initial_values.at<gtsam::Pose3>(node_idx).rotation().pitch();
+        p.yaw = initial_values.at<gtsam::Pose3>(node_idx).rotation().yaw();
+        key_idx++;
+      }
+    }
+    mKF.unlock();
+
+    mtxRecentPose.lock();
+    const gtsam::Pose3& lastOptimizedPose = isamCurrentEstimate.at<gtsam::Pose3>(int(isamCurrentEstimate.size())-1);
+    mtxRecentPose.unlock();
+} // updatePoses
+
+void runISAM2opt(void)
+{
+    // called when a variable added
+    isam->update(*graph, initial_values);
+    isam->update();
+
+    graph->resize(0);
+    initial_values.clear();
+
+    isamCurrentEstimate = isam->calculateEstimate();
+    updatePoses();
+}
+
+void loopFindNearKeyframesCloud( pcl::PointCloud<PointType>::Ptr& nearKeyframes, const int& key, const int& submap_size, const int& root_kf_idx)
+{
+    // extract and stacking near keyframes (in global coord)
+    nearKeyframes->clear();
+    for (int i = -submap_size; i <= submap_size; ++i) {
+        int keyNear = key + i;
+        if (keyNear < 0 || keyNear >= keyframeLaserClouds.size() )
+            continue;
+
+        mKF.lock();
+        *nearKeyframes += * local2global(keyframeLaserClouds[keyNear], keyframePosesUpdated[root_kf_idx].second);
+        mKF.unlock();
+    }
+
+    if (nearKeyframes->empty())
+        return;
+
+    // downsample near keyframes
+    pcl::PointCloud<PointType>::Ptr cloud_temp(new pcl::PointCloud<PointType>());
+    downSizeFilterICP.setInputCloud(nearKeyframes);
+    downSizeFilterICP.filter(*cloud_temp);
+    *nearKeyframes = *cloud_temp;
+} // loopFindNearKeyframesCloud
+
+std::optional<gtsam::Pose3> doICPVirtualRelative(int _loop_kf_idx, int _curr_kf_idx)
+{
+  // parse pointclouds
+  int historyKeyframeSearchNum = 10; // enough. ex. [-25, 25] covers submap length of 50x1 = 50m if every kf gap is 1m
+  pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
+  pcl::PointCloud<PointType>::Ptr targetKeyframeCloud(new pcl::PointCloud<PointType>());
+  loopFindNearKeyframesCloud(cureKeyframeCloud, _curr_kf_idx, 0, _loop_kf_idx); // use same root of loop kf idx
+  loopFindNearKeyframesCloud(targetKeyframeCloud, _loop_kf_idx, historyKeyframeSearchNum, _loop_kf_idx);
+
+  // loop verification
+  // sensor_msgs::PointCloud2 cureKeyframeCloudMsg;
+  // pcl::toROSMsg(*cureKeyframeCloud, cureKeyframeCloudMsg);
+  // cureKeyframeCloudMsg.header.frame_id = "/camera_init";
+  // pubLoopScanLocal.publish(cureKeyframeCloudMsg);
+
+  // sensor_msgs::PointCloud2 targetKeyframeCloudMsg;
+  // pcl::toROSMsg(*targetKeyframeCloud, targetKeyframeCloudMsg);
+  // targetKeyframeCloudMsg.header.frame_id = "/camera_init";
+  // pubLoopSubmapLocal.publish(targetKeyframeCloudMsg);
+
+  // ICP Settings
+  pcl::IterativeClosestPoint<PointType, PointType> icp;
+  icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter
+  icp.setMaximumIterations(100);
+  icp.setTransformationEpsilon(1e-6);
+  icp.setEuclideanFitnessEpsilon(1e-6);
+  icp.setRANSACIterations(0);
+
+  // Align pointclouds
+  icp.setInputSource(cureKeyframeCloud);
+  icp.setInputTarget(targetKeyframeCloud);
+  pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
+  icp.align(*unused_result);
+
+  float loopFitnessScoreThreshold = 2.0; // user parameter but fixed low value is safe.
+  if (icp.hasConverged() == false || icp.getFitnessScore() > loopFitnessScoreThreshold)
+  {
+    std::cout << "[SC loop] ICP fitness test failed (" << icp.getFitnessScore() << " > " << loopFitnessScoreThreshold << "). Reject this SC loop." << std::endl;
+    return std::nullopt;
+  }
+  else
+  {
+    std::cout << "[SC loop] ICP fitness test passed (" << icp.getFitnessScore() << " < " << loopFitnessScoreThreshold << "). Add this SC loop." << std::endl;
+  }
+
+  // Get pose transformation
+  float x, y, z, roll, pitch, yaw;
+  Eigen::Affine3f correctionLidarFrame;
+  correctionLidarFrame = icp.getFinalTransformation();
+  pcl::getTranslationAndEulerAngles(correctionLidarFrame, x, y, z, roll, pitch, yaw);
+  gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
+  gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
+
+  return poseFrom.between(poseTo);
+} // doICPVirtualRelative
+
+void process_LC_icp(void)
+{
+    while(1)
+    {
+		while ( !scLoopICPBuf.empty() )
+        {
+            if( scLoopICPBuf.size() > 30 ) {
+                ROS_WARN("Too many loop clousre candidates to be ICPed is waiting ... Do process_lcd less frequently (adjust loopClosureFrequency)");
+            }
+
+            mBuf.lock();
+            std::pair<int, int> loop_idx_pair = scLoopICPBuf.front();
+            scLoopICPBuf.pop();
+            mBuf.unlock();
+
+            const int prev_node_idx = loop_idx_pair.first;
+            const int curr_node_idx = loop_idx_pair.second;
+            auto relative_pose_optional = doICPVirtualRelative(prev_node_idx, curr_node_idx);
+            if(relative_pose_optional) {
+                gtsam::Pose3 relative_pose = relative_pose_optional.value();
+                Vector6 icp_noise_sigma;
+                icp_noise_sigma << 0.001, 0.001, 0.001, 0.02, 0.02, 0.02;
+                noiseModel::Diagonal::shared_ptr icp_noise_model = noiseModel::Diagonal::Sigmas(icp_noise_sigma);
+                mtxPosegraph.lock();
+                graph->add(gtsam::BetweenFactor<gtsam::Pose3>(keyframePoses[prev_node_idx].first, keyframePoses[curr_node_idx].first, relative_pose, icp_noise_model));
+                // runISAM2opt();
+                updatePoses();
+                mtxPosegraph.unlock();
+            }
+        }
+
+        // wait (must required for running the while loop)
+        std::chrono::milliseconds dura(2);
+        std::this_thread::sleep_for(dura);
+    }
+} // process_LC_icp
+
+int main(int argc, char **argv)
+{
+
+  ros::init(argc, argv, "radar_odometry");
+  ros::NodeHandle n("~");
+  pubRadarCloudSurround = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_surround", 100);
+  pubRadarSubMap = n.advertise<sensor_msgs::PointCloud2>("/radar_submap", 100);
+  pubRadarPath = n.advertise<nav_msgs::Path>("/radar_path", 5);
+  pubRadarVel = n.advertise<geometry_msgs::Twist>("/radar_vel", 5);
+  pubOdomGT = n.advertise<nav_msgs::Odometry>("/lidar_gt", 100);
+  radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig config;
+  config_init(config);
+  radar_ego_velocity.configure(config);
+  initNoises();
+  std::size_t order = 1;
+  n.getParam("bag_path", bag_path);
+  n.getParam("topic_imu", topic_imu);
+  n.getParam("topic_radar_scan", topic_radar_scan);
+  n.getParam("topic_lidar_gt", topic_lidar_gt);
+  n.getParam("topic_gps_gt", topic_gps_gt);
+
+  // colo radar
+  // R_enu_radar << 0.000796, -1, 0,
+  //     1, 0.000796, 0,
+  //     0, 0, 1;
+
+  // songhong
+  T_enu_radar << 0.99661164, -0.0819717, 0.010574, 3.7759,
+    -0.081822456, -0.9965847, -0.01385872, -0.24948372,
+    0.011714, 0.01290198, -0.999848363, -0.0439992834,
+    0.0, 0.0, 0.0, 1.0;
+
+  
+
+  currOdom = Eigen::Matrix<double, 4, 4>::Identity();
+
+  std::thread posegraph_odom {process_odom}; // pose odom construction
+  std::thread posegraph_slam {process_pg}; // pose graph construction
+	std::thread lc_detection {process_lcd}; // loop closure detection 
+  std::thread icp_calculation {process_LC_icp}; // loop constraint calculation via icp 
+	std::thread viz_map {process_viz_map}; // visualization - map (low frequency because it is heavy)
+	std::thread viz_path {process_viz_path}; // visualization - path (high frequency)
+
+  ros::spin();
+}
+
+
 
 void main_task()
 {
@@ -554,7 +918,9 @@ void main_task()
     auto radar_data_msg = queue_radar.front();
     sensor_msgs::PointCloud2 inlier_radar_scan;
     radar_ego_velocity.estimate(radar_data_msg, v_r, sigma_v_r, inlier_radar_scan);
-
+    vel_correction_count++;
+    R_enu_radar = T_enu_radar.topLeftCorner<3,3>();
+    v_r = R_enu_radar*v_r;
     gyro_last = gyro_last - prev_bias.vector().tail<3>();
     Eigen::Matrix<double, 3, 3> gyro_x;
     gyro_x << 0, -gyro_last(2), gyro_last(1),
@@ -563,10 +929,9 @@ void main_task()
 
     v_r = v_r - gyro_x * lbr;
     noiseModel::Diagonal::shared_ptr radar_noise_model = noiseModel::Diagonal::Sigmas(sigma_v_r);
-    RadarFactor radar_factor(X(correction_count), V(correction_count),
+    RadarFactor radar_factor(X(vel_correction_count), V(vel_correction_count),
                              v_r,
                              radar_noise_model);
-    graph->add(radar_factor);
 
     pcl::PointCloud<OculiiPointCloudType> scan_OculliRadar;
     pcl::PCLPointCloud2 pcl_pc2;
@@ -592,8 +957,7 @@ void main_task()
     radar_update = radar_data_msg.header.stamp.toSec();
     queue_radar.pop();
     double time_diff = gt_update - radar_update;
-    if (time_diff < 0.1)
-    {
+
       // GICP
       fast_gicp::FastGICPSingleThread<pcl::PointXYZI, pcl::PointXYZI> fgicp_st;
       fgicp_st.clearTarget();
@@ -607,13 +971,70 @@ void main_task()
       std::cout << "has converged:" << fgicp_st.hasConverged() << " score: " << fgicp_st.getFitnessScore() << std::endl;
       std::cout << fgicp_st.getFinalTransformation() << std::endl;
 
-      Eigen::Matrix<double, 4, 4> icp_result = fgicp_st.getFinalTransformation().cast<double>();
+      Eigen::Matrix<double, 4, 4> icp_result = T_enu_radar*fgicp_st.getFinalTransformation().cast<double>()*T_enu_radar.inverse();
+      
       currOdom = currOdom * icp_result;
       Rtrans = currOdom.topLeftCorner<3, 3>();
       t_w_curr = currOdom.topRightCorner<3, 1>();
-    }
-    graph->add(gtsam::BetweenFactor<gtsam::Pose3>(prev_node_idx, curr_node_idx, poseFrom.between(poseTo), odomNoise));
 
+      // Get pose transformation
+      float x, y, z, roll, pitch, yaw;
+      Eigen::Affine3f correctionLidarFrame;
+      correctionLidarFrame = fgicp_st.getFinalTransformation();
+      pcl::getTranslationAndEulerAngles(correctionLidarFrame, x, y, z, roll, pitch, yaw);
+      gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
+      gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
+    
+    Vector6 icp_noise_sigma;
+    icp_noise_sigma << 0.001, 0.001, 0.001, 0.02, 0.02, 0.02;
+    noiseModel::Diagonal::shared_ptr icp_noise_model = noiseModel::Diagonal::Sigmas(icp_noise_sigma);
+    icp_correction_count = vel_correction_count;
+
+    // 预计分测量值
+    PreintegratedCombinedMeasurements *preint_imu_combined = dynamic_cast<PreintegratedCombinedMeasurements *>(imu_preintegrated_);
+    // IMU 因子
+    // typedef NoiseModelFactor6<Pose3, Vector3, Pose3, Vector3,imuBias::ConstantBias, imuBias::ConstantBias>
+    CombinedImuFactor imu_factor(X(vel_correction_count - 1), V(vel_correction_count - 1),
+                                 X(vel_correction_count), V(vel_correction_count),
+                                 B(vel_correction_count - 1), B(vel_correction_count),
+                                 *preint_imu_combined);
+
+    mtxPosegraph.lock();
+    graph->add(radar_factor);
+    graph->add(gtsam::BetweenFactor<gtsam::Pose3>(X(icp_correction_count-1), X(icp_correction_count), poseFrom.between(poseTo), icp_noise_model));
+    graph->add(imu_factor);
+
+    // 迭代更新求解imu预测值
+    prop_state = imu_preintegrated_->predict(prev_state, prev_bias);
+    Eigen::Vector3d curr_euler = R2rpy(prop_state.pose().rotation().toQuaternion().toRotationMatrix());
+
+    initial_values.insert(X(vel_correction_count), prop_state.pose());
+    initial_values.insert(V(vel_correction_count), prop_state.v());
+    initial_values.insert(B(vel_correction_count), prev_bias);
+
+    LevenbergMarquardtOptimizer optimizer(*graph, initial_values);
+    result = optimizer.optimize();
+    mtxPosegraph.unlock();
+
+    // 更新下一步预计分初始值
+    // 导航状态
+    prev_state = NavState(result.at<Pose3>(X(vel_correction_count)),
+                          result.at<Vector3>(V(vel_correction_count)));
+    // 偏导数
+    prev_bias = result.at<imuBias::ConstantBias>(B(vel_correction_count));
+    // 更新预计分值
+    imu_preintegrated_->resetIntegrationAndSetBias(prev_bias);
+    // 更新关键帧位姿
+    updatePoses();
+
+    mBuf.lock();
+    odomBuf.push(result.at<Pose3>(X(vel_correction_count))) ;
+    mBuf.unlock();
+
+    mBuf.lock();
+    fullResBuf.push(src);
+    mBuf.unlock();
+    
   }
 
   if (!queue_imu.empty())
@@ -640,7 +1061,6 @@ void main_task()
 
   mutex_1.unlock();
 }
-
 
 void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msg)
 {
@@ -680,10 +1100,10 @@ void config_init(radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig 
   config.min_dist = 0.25;
   config.max_dist = 100;
   config.min_db = 0;
-  config.elevation_thresh_deg = 60;
+  config.elevation_thresh_deg = 15;
   config.azimuth_thresh_deg = 60;
-  config.filter_min_z = -3;
-  config.filter_max_z = 3;
+  config.filter_min_z = -10;
+  config.filter_max_z = 10;
   config.doppler_velocity_correction_factor = 1.0;
 
   config.thresh_zero_velocity = 0.05;

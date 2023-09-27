@@ -4,6 +4,8 @@ project(odometry_4dradar)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
 # SET(CMAKE_BUILD_TYPE "Debug")
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g")
 
 find_package(catkin REQUIRED COMPONENTS
     geometry_msgs
@@ -17,12 +19,14 @@ find_package(catkin REQUIRED COMPONENTS
     tf
     radar_ego_velocity_estimator
     fast_gicp
+    ld_msgs
 )
 
 find_package(PCL 1.8 REQUIRED)
 find_package(Boost REQUIRED COMPONENTS thread)
 find_package(Ceres REQUIRED)
 FIND_PACKAGE(GTSAM REQUIRED)
+find_package(OpenMP REQUIRED)
 
 include_directories(
     include
@@ -45,7 +49,7 @@ catkin_package(
 list(REMOVE_ITEM PCL_LIBRARIES "vtkproj4")
 
 add_executable(icp4radar src/iterative_closest_point.cpp third_party/ikd-Tree/ikd_Tree.cpp)
-add_executable(radar_odometry src/radar_odometry.cpp third_party/ikd-Tree/ikd_Tree.cpp)
+add_executable(radar_odometry src/radar_odometry.cpp third_party/ikd-Tree/ikd_Tree.cpp include/scancontext/Scancontext.cpp)
 
 target_link_libraries(icp4radar ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${Boost_LIBRARIES})
 target_link_libraries(radar_odometry ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${Boost_LIBRARIES} ${CERES_LIBRARIES} -lgtsam)

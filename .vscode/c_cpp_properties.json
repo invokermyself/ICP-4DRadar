@@ -3,19 +3,19 @@
         {
             "name": "Linux",
             "includePath": [
-                "${default}",
-                "/opt/ros/melodic/include/**",
                 "/home/invoker/catkin_ws/devel/include/**",
+                "/opt/ros/melodic/include/**",
                 "/home/invoker/catkin_ws/src/ICP-4DRadar/include/",
                 "/home/invoker/catkin_ws/src/ICP-4DRadar/third_party/ikd-Tree",
                 "/home/invoker/catkin_ws/src/rio/reve/radar_ego_velocity_estimator/include/**",
                 "/home/invoker/catkin_ws/src/fast_gicp/include/**",
+                "/usr/include/**"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",
-            "cStandard": "c11",
-            "cppStandard": "gnu++14",
-            "intelliSenseMode": "linux-gcc-x64",
+            "cStandard": "gnu11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "gcc-x64",
             "configurationProvider": "go2sh.cmake-integration"
         }
     ],
