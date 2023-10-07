@@ -62,6 +62,7 @@
 
 #define MAX_SEARCH_RADIUS 2.0f
 #define RADAR_RADIUS 80
+#define SONGLING
 
 using namespace std;
 // using PointVector = KD_TREE<ikdTree_PointType>::PointVector;
@@ -520,24 +521,24 @@ void process_odom()
     const auto topic = m.getTopic();
     if (topic == topic_imu)
     {
-      // const auto imu_msg_bag = m.instantiate<sensor_msgs::Imu>();
+#ifdef SONGHONG
       const auto imu_msg_bag = m.instantiate<ld_msgs::ld_can>();
       bool Imu_update = false;
       if (imu_msg_bag != NULL && imu_msg_bag->ID == 0x605)
       {
         imu_msg_new->header = imu_msg_bag->header;
-        double ax = (int16_t)((imu_msg_bag->DATA[1] <<8) + imu_msg_bag->DATA[0]) * 0.01;
-        double ay = (int16_t)((imu_msg_bag->DATA[3] <<8) + imu_msg_bag->DATA[2]) * 0.01;
-        double az = (int16_t)((imu_msg_bag->DATA[5] <<8) + imu_msg_bag->DATA[4]) * 0.01;
+        double ax = (int16_t)((imu_msg_bag->DATA[1] << 8) + imu_msg_bag->DATA[0]) * 0.01;
+        double ay = (int16_t)((imu_msg_bag->DATA[3] << 8) + imu_msg_bag->DATA[2]) * 0.01;
+        double az = (int16_t)((imu_msg_bag->DATA[5] << 8) + imu_msg_bag->DATA[4]) * 0.01;
         imu_msg_new->linear_acceleration.x = ax;
         imu_msg_new->linear_acceleration.y = ay;
         imu_msg_new->linear_acceleration.z = az;
       }
-      else if(imu_msg_bag != NULL && imu_msg_bag->ID == 0x608)
+      else if (imu_msg_bag != NULL && imu_msg_bag->ID == 0x608)
       {
-        double wx = (int16_t)((imu_msg_bag->DATA[1] <<8) + imu_msg_bag->DATA[0]) * (0.01*M_PI/180.0f);
-        double wy = (int16_t)((imu_msg_bag->DATA[3] <<8) + imu_msg_bag->DATA[2]) * (0.01*M_PI/180.0f);
-        double wz = (int16_t)((imu_msg_bag->DATA[5] <<8) + imu_msg_bag->DATA[4]) * (0.01*M_PI/180.0f);
+        double wx = (int16_t)((imu_msg_bag->DATA[1] << 8) + imu_msg_bag->DATA[0]) * (0.01 * M_PI / 180.0f);
+        double wy = (int16_t)((imu_msg_bag->DATA[3] << 8) + imu_msg_bag->DATA[2]) * (0.01 * M_PI / 180.0f);
+        double wz = (int16_t)((imu_msg_bag->DATA[5] << 8) + imu_msg_bag->DATA[4]) * (0.01 * M_PI / 180.0f);
         imu_msg_new->angular_velocity.x = wx;
         imu_msg_new->angular_velocity.y = wy;
         imu_msg_new->angular_velocity.z = wz;
@@ -547,6 +548,15 @@ void process_odom()
       {
         callbackIMU(imu_msg_new);
       }
+#endif
+
+#ifdef SONGLING
+      const auto imu_msg_bag = m.instantiate<sensor_msgs::Imu>();
+      if (imu_msg_bag != NULL)
+      {
+        callbackIMU(imu_msg_bag);
+      }
+#endif
     }
 
     else if (topic == topic_radar_scan)
@@ -879,11 +889,20 @@ int main(int argc, char **argv)
   //     1, 0.000796, 0,
   //     0, 0, 1;
 
-  // songhong
+#ifdef SONGHONG
   T_enu_radar << 0.99661164, -0.0819717, 0.010574, 3.7759,
     -0.081822456, -0.9965847, -0.01385872, -0.24948372,
     0.011714, 0.01290198, -0.999848363, -0.0439992834,
     0.0, 0.0, 0.0, 1.0;
+#endif
+
+#ifdef SONGLING
+  T_enu_radar << 0.99984752, -0.0156398, -0.0055276, 0.2801,
+  -0.0157201, -0.9997379, -0.0177237, -0.0257,
+  -0.0052882, 0.01778338, -0.9998615, 0.0753,
+  0.0, 0.0, 0.0, 1.0;
+#endif
+  
 
   
 
