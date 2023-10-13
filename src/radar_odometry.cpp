@@ -16,6 +16,7 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/visualization/pcl_visualizer.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/registration/gicp.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/PointCloud.h>
 #include <sensor_msgs/point_cloud_conversion.h>
@@ -24,6 +25,8 @@
 #include <gps_common/GPSFix.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <ld_msgs/ld_can.h>
+#include <tf/transform_datatypes.h>
+#include <tf/transform_broadcaster.h>
 
 #include <ros/ros.h>
 #include <rosbag/bag.h>
@@ -62,7 +65,9 @@
 
 #define MAX_SEARCH_RADIUS 2.0f
 #define RADAR_RADIUS 80
-#define SONGLING
+// #define SONGLING
+#define SONGHONG
+#define USE_COMBINED
 
 using namespace std;
 // using PointVector = KD_TREE<ikdTree_PointType>::PointVector;
@@ -142,7 +147,7 @@ Vector3 lbr (0.0901, -0.1449, 0.0249); //colo
 int vel_correction_count = 0;
 int icp_correction_count = 0;
 std::queue<Pose3> odomBuf;
-std::queue<pcl::PointCloud<PointType>::Ptr> fullResBuf;
+std::queue<pcl::PointCloud<PointType>> fullResBuf;
 
 Eigen::Matrix<double, 3, 3> Rtrans;
 Eigen::Matrix<double, 3, 3> R_enu_radar;
@@ -165,6 +170,7 @@ Pose6D odom_pose_prev {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init
 Pose6D odom_pose_curr {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init pose is zero 
 double keyframeMeterGap;
 double movementAccumulation = 1000000.0; // large value means must add the first given frame.
+double scDistThres;
 bool isNowKeyFrame = false;
 
 
@@ -202,6 +208,8 @@ ros::Publisher pubRadarSubMap;
 ros::Publisher pubRadarPath;
 ros::Publisher pubRadarVel;
 ros::Publisher pubOdomGT;
+ros::Publisher pubOdomAftPGO;
+ros::Publisher pubPathAftPGO;
 
 static Eigen::Vector3d R2rpy(const Eigen::Matrix3d &R)
 {
@@ -480,6 +488,49 @@ void process_viz_path(void)
           RadarVel.linear.y = v_r(1);
           RadarVel.linear.z = v_r(2);
           pubRadarVel.publish(RadarVel);
+
+          // pub odom and path
+          nav_msgs::Odometry odomAftPGO;
+          nav_msgs::Path pathAftPGO;
+          pathAftPGO.header.frame_id = "/camera_init";
+          mKF.lock();
+          for (int node_idx = 0; node_idx < int(keyframePosesUpdated.size()) - 1; node_idx++) // -1 is just delayed visualization (because sometimes mutexed while adding(push_back) a new one)
+          {
+            const Pose6D &pose_est = keyframePosesUpdated.at(node_idx).second; // upodated poses
+            // const gtsam::Pose3& pose_est = isamCurrentEstimate.at<gtsam::Pose3>(node_idx);
+
+            nav_msgs::Odometry odomAftPGOthis;
+            odomAftPGOthis.header.frame_id = "/camera_init";
+            odomAftPGOthis.child_frame_id = "/aft_pgo";
+            odomAftPGOthis.header.stamp = ros::Time().now();
+            odomAftPGOthis.pose.pose.position.x = pose_est.x;
+            odomAftPGOthis.pose.pose.position.y = pose_est.y;
+            odomAftPGOthis.pose.pose.position.z = pose_est.z;
+            odomAftPGOthis.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(pose_est.roll, pose_est.pitch, pose_est.yaw);
+            odomAftPGO = odomAftPGOthis;
+
+            geometry_msgs::PoseStamped poseStampAftPGO;
+            poseStampAftPGO.header = odomAftPGOthis.header;
+            poseStampAftPGO.pose = odomAftPGOthis.pose.pose;
+
+            pathAftPGO.header.stamp = odomAftPGOthis.header.stamp;
+            pathAftPGO.header.frame_id = "/camera_init";
+            pathAftPGO.poses.push_back(poseStampAftPGO);
+          }
+          mKF.unlock();
+          pubOdomAftPGO.publish(odomAftPGO); // last pose
+          pubPathAftPGO.publish(pathAftPGO); // poses
+
+          static tf::TransformBroadcaster br;
+          tf::Transform transform;
+          tf::Quaternion q;
+          transform.setOrigin(tf::Vector3(odomAftPGO.pose.pose.position.x, odomAftPGO.pose.pose.position.y, odomAftPGO.pose.pose.position.z));
+          q.setW(odomAftPGO.pose.pose.orientation.w);
+          q.setX(odomAftPGO.pose.pose.orientation.x);
+          q.setY(odomAftPGO.pose.pose.orientation.y);
+          q.setZ(odomAftPGO.pose.pose.orientation.z);
+          transform.setRotation(q);
+          br.sendTransform(tf::StampedTransform(transform, odomAftPGO.header.stamp, "/camera_init", "/aft_pgo"));
         }
     }
 }
@@ -600,24 +651,12 @@ void process_pg()
   {
     while (!odomBuf.empty() && !fullResBuf.empty())
     {
-      //
-      // pop and check keyframe is or not
-      //
-      mBuf.lock();
-      while (!odomBuf.empty())
-        odomBuf.pop();
-      if (odomBuf.empty())
-      {
-        mBuf.unlock();
-        break;
-      }
-
       // Time equal check
 
       // TODO
 
       pcl::PointCloud<PointType>::Ptr thisKeyFrame(new pcl::PointCloud<PointType>());
-      pcl::copyPointCloud(*fullResBuf.front(),*thisKeyFrame);
+      pcl::copyPointCloud(fullResBuf.front(),*thisKeyFrame);
       fullResBuf.pop();
 
       Pose6D pose_curr = GTSAMPose3toPose6D(odomBuf.front());
@@ -694,7 +733,7 @@ void process_pg()
         // wait (must required for running the while loop)
         std::chrono::milliseconds dura(2);
         std::this_thread::sleep_for(dura);
-    }
+  }
 } // process_pg
 
 void process_lcd(void)
@@ -712,24 +751,28 @@ void process_lcd(void)
 void updatePoses(void)
 {
     mKF.lock();
-    for (int key_idx,node_idx=0; node_idx < int(initial_values.size()); node_idx++)
+    for (int key_idx=0,node_idx=0; node_idx < int(initial_values.size()); node_idx++)
     {
-      if(node_idx == keyframePosesUpdated[key_idx].first && key_idx < int(keyframePosesUpdated.size()))
+      if(key_idx < int(keyframePosesUpdated.size()) && node_idx == keyframePosesUpdated[key_idx].first)
       {
         Pose6D& p = keyframePosesUpdated[key_idx].second;
-        p.x = initial_values.at<gtsam::Pose3>(node_idx).translation().x();
-        p.y = initial_values.at<gtsam::Pose3>(node_idx).translation().y();
-        p.z = initial_values.at<gtsam::Pose3>(node_idx).translation().z();
-        p.roll = initial_values.at<gtsam::Pose3>(node_idx).rotation().roll();
-        p.pitch = initial_values.at<gtsam::Pose3>(node_idx).rotation().pitch();
-        p.yaw = initial_values.at<gtsam::Pose3>(node_idx).rotation().yaw();
+        p.x = initial_values.at<gtsam::Pose3>(X(node_idx)).translation().x();
+        p.y = initial_values.at<gtsam::Pose3>(X(node_idx)).translation().y();
+        p.z = initial_values.at<gtsam::Pose3>(X(node_idx)).translation().z();
+        p.roll = initial_values.at<gtsam::Pose3>(X(node_idx)).rotation().roll();
+        p.pitch = initial_values.at<gtsam::Pose3>(X(node_idx)).rotation().pitch();
+        p.yaw = initial_values.at<gtsam::Pose3>(X(node_idx)).rotation().yaw();
         key_idx++;
       }
     }
     mKF.unlock();
 
     mtxRecentPose.lock();
-    const gtsam::Pose3& lastOptimizedPose = isamCurrentEstimate.at<gtsam::Pose3>(int(isamCurrentEstimate.size())-1);
+    if(isamCurrentEstimate.size() > 0)
+    {
+      const gtsam::Pose3& lastOptimizedPose = isamCurrentEstimate.at<gtsam::Pose3>(int(isamCurrentEstimate.size())-1);
+    }
+
     mtxRecentPose.unlock();
 } // updatePoses
 
@@ -873,6 +916,8 @@ int main(int argc, char **argv)
   pubRadarPath = n.advertise<nav_msgs::Path>("/radar_path", 5);
   pubRadarVel = n.advertise<geometry_msgs::Twist>("/radar_vel", 5);
   pubOdomGT = n.advertise<nav_msgs::Odometry>("/lidar_gt", 100);
+  pubOdomAftPGO = n.advertise<nav_msgs::Odometry>("/aft_pgo_odom", 100);
+  pubPathAftPGO = n.advertise<nav_msgs::Path>("/aft_pgo_path", 100);
   radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig config;
   config_init(config);
   radar_ego_velocity.configure(config);
@@ -883,6 +928,7 @@ int main(int argc, char **argv)
   n.getParam("topic_radar_scan", topic_radar_scan);
   n.getParam("topic_lidar_gt", topic_lidar_gt);
   n.getParam("topic_gps_gt", topic_gps_gt);
+  n.param<double>("sc_dist_thres", scDistThres, 0.5); // pose assignment every k frames 
 
   // colo radar
   // R_enu_radar << 0.000796, -1, 0,
@@ -939,7 +985,6 @@ void main_task()
     radar_ego_velocity.estimate(radar_data_msg, v_r, sigma_v_r, inlier_radar_scan);
     vel_correction_count++;
     R_enu_radar = T_enu_radar.topLeftCorner<3,3>();
-    v_r = R_enu_radar*v_r;
     gyro_last = gyro_last - prev_bias.vector().tail<3>();
     Eigen::Matrix<double, 3, 3> gyro_x;
     gyro_x << 0, -gyro_last(2), gyro_last(1),
@@ -947,23 +992,26 @@ void main_task()
         -gyro_last(1), gyro_last(0), 0;
 
     v_r = v_r - gyro_x * lbr;
+    v_r = R_enu_radar*v_r;
+
     noiseModel::Diagonal::shared_ptr radar_noise_model = noiseModel::Diagonal::Sigmas(sigma_v_r);
     RadarFactor radar_factor(X(vel_correction_count), V(vel_correction_count),
                              v_r,
                              radar_noise_model);
 
     pcl::PointCloud<OculiiPointCloudType> scan_OculliRadar;
+    pcl::PointCloud<RadarPointCloudType> scan_reve;
     pcl::PCLPointCloud2 pcl_pc2;
     pcl_conversions::toPCL(inlier_radar_scan, pcl_pc2);
-    pcl::fromPCLPointCloud2(pcl_pc2, scan_OculliRadar);
-    int point_num = scan_OculliRadar.size();
+    pcl::fromPCLPointCloud2(pcl_pc2, scan_reve);
+    int point_num = scan_reve.size();
     for (size_t i = 0; i < point_num; i++)
     {
       pcl::PointXYZI p_sel;
-      p_sel.x = scan_OculliRadar.points[i].x;
-      p_sel.y = scan_OculliRadar.points[i].y;
-      p_sel.z = scan_OculliRadar.points[i].z;
-      p_sel.intensity = scan_OculliRadar.points[i].Power;
+      p_sel.x = scan_reve.points[i].x;
+      p_sel.y = scan_reve.points[i].y;
+      p_sel.z = scan_reve.points[i].z;
+      p_sel.intensity = scan_reve.points[i].snr_db;
       src->push_back(p_sel);
     }
 
@@ -978,19 +1026,28 @@ void main_task()
     double time_diff = gt_update - radar_update;
 
       // GICP
-      fast_gicp::FastGICPSingleThread<pcl::PointXYZI, pcl::PointXYZI> fgicp_st;
-      fgicp_st.clearTarget();
-      fgicp_st.clearSource();
-      fgicp_st.setInputTarget(tar);
-      fgicp_st.setInputSource(src);
-      fgicp_st.setCorrespondenceRandomness(5);
-      fgicp_st.align(*Final);
-      double score = fgicp_st.getFitnessScore();
+      // fast_gicp::FastGICPSingleThread<pcl::PointXYZI, pcl::PointXYZI> fgicp_st;
+      // fgicp_st.clearTarget();
+      // fgicp_st.clearSource();
+      // std::vector<int> mapping;
+      // pcl::removeNaNFromPointCloud(*src,*src,mapping);
+      // pcl::removeNaNFromPointCloud(*tar,*tar,mapping);
+      // fgicp_st.setInputTarget(tar);
+      // fgicp_st.setInputSource(src);
+      // fgicp_st.setCorrespondenceRandomness(5);
+      // fgicp_st.align(*Final);
+      // double score = fgicp_st.getFitnessScore();
 
-      std::cout << "has converged:" << fgicp_st.hasConverged() << " score: " << fgicp_st.getFitnessScore() << std::endl;
-      std::cout << fgicp_st.getFinalTransformation() << std::endl;
+      pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> gicp;
+      gicp.setInputTarget(tar);
+      gicp.setInputSource(src);
+      gicp.setCorrespondenceRandomness(5);
+      gicp.align(*Final);
 
-      Eigen::Matrix<double, 4, 4> icp_result = T_enu_radar*fgicp_st.getFinalTransformation().cast<double>()*T_enu_radar.inverse();
+      std::cout << "has converged:" << gicp.hasConverged() << " score: " << gicp.getFitnessScore() << std::endl;
+      std::cout << gicp.getFinalTransformation() << std::endl;
+
+      Eigen::Matrix<double, 4, 4> icp_result = T_enu_radar*gicp.getFinalTransformation().cast<double>()*T_enu_radar.inverse();
       
       currOdom = currOdom * icp_result;
       Rtrans = currOdom.topLeftCorner<3, 3>();
@@ -999,15 +1056,17 @@ void main_task()
       // Get pose transformation
       float x, y, z, roll, pitch, yaw;
       Eigen::Affine3f correctionLidarFrame;
-      correctionLidarFrame = fgicp_st.getFinalTransformation();
+      correctionLidarFrame = gicp.getFinalTransformation();
       pcl::getTranslationAndEulerAngles(correctionLidarFrame, x, y, z, roll, pitch, yaw);
       gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
       gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
+      
     
     Vector6 icp_noise_sigma;
     icp_noise_sigma << 0.001, 0.001, 0.001, 0.02, 0.02, 0.02;
     noiseModel::Diagonal::shared_ptr icp_noise_model = noiseModel::Diagonal::Sigmas(icp_noise_sigma);
     icp_correction_count = vel_correction_count;
+    BetweenFactor<gtsam::Pose3> odomtry_factor(X(icp_correction_count-1), X(icp_correction_count), poseFrom.between(poseTo), icp_noise_model);
 
     // 预计分测量值
     PreintegratedCombinedMeasurements *preint_imu_combined = dynamic_cast<PreintegratedCombinedMeasurements *>(imu_preintegrated_);
@@ -1020,7 +1079,7 @@ void main_task()
 
     mtxPosegraph.lock();
     graph->add(radar_factor);
-    graph->add(gtsam::BetweenFactor<gtsam::Pose3>(X(icp_correction_count-1), X(icp_correction_count), poseFrom.between(poseTo), icp_noise_model));
+    graph->add(odomtry_factor);
     graph->add(imu_factor);
 
     // 迭代更新求解imu预测值
@@ -1051,7 +1110,7 @@ void main_task()
     mBuf.unlock();
 
     mBuf.lock();
-    fullResBuf.push(src);
+    fullResBuf.push(*src);
     mBuf.unlock();
     
   }
