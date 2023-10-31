@@ -1,9 +1,9 @@
 <launch>
     
     <node name="icp4radar" pkg="odometry_4dradar" type="icp4radar" output="screen"> 
-        <!-- <param name="dataset_folder" type="string" value="/media/invoker/Test_4T/2023-04-22/radar_bin/" /> -->
-        <param name="dataset_folder" type="string" value="/media/invoker/Toshiba_1T/ColoDataset/2_23_2021_edgar_classroom_run0/single_chip/pointclouds/" />
-        <param name="sequence_number" type="string" value="01" />
+        <param name="dataset_folder" type="string" value="/media/invoker/7c55e174-1f14-4e90-beed-a4a0a04c709e/2023-5-26/" />
+        <!-- <param name="dataset_folder" type="string" value="/media/invoker/Toshiba_1T/ColoDataset/2_23_2021_edgar_classroom_run0/single_chip/pointclouds/" /> -->
+        <param name="sequence_number" type="string" value="06" />
     </node>
 
     <!-- <arg name="rviz" default="true" />

@@ -10,6 +10,8 @@
 #include <pcl/filters/filter.h>
 #include <pcl/visualization/pcl_visualizer.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/registration/gicp.h>
+#include <pcl/filters/voxel_grid.h>
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/Path.h>
 #include <sensor_msgs/PointCloud2.h>
@@ -30,7 +32,7 @@ using namespace std;
 #define USE_BIN_FILES // select the input source
 // #define USE_ICP_RESULT
 // #define USE_LOCAL_MAP
-#define RESULT_GAP 1
+#define RESULT_GAP 3
 
 double para_q[4] = {0, 0, 0, 1};
 double para_t[3] = {0, 0, 0};
@@ -40,7 +42,7 @@ Eigen::Vector3d t(para_t);
 Eigen::Vector4d pos({0, 0, 0, 1});
 Eigen::Matrix<double, 3, 3> Rtrans;
 Eigen::MatrixXd currOdom;
-
+pcl::VoxelGrid<PointType> downSizeFilterMapPGO;
 void pointAssociateToMap(PointType const *const pi, PointType *const po)
 {
 	Eigen::Vector3d point_curr(pi->x, pi->y, pi->z);
@@ -147,7 +149,7 @@ int main(int argc, char **argv)
 	n.getParam("sequence_number", sequence_number);
 #endif
 
-	velocity_odom_path << dataset_folder << "radar";
+	velocity_odom_path << dataset_folder << sequence_number+  "/radar";
 	if (access(velocity_odom_path.str().c_str(), 0))
 	{
 		std::cout << "folder dose not exist!! Will create a new one!" << std::endl;
@@ -167,19 +169,19 @@ int main(int argc, char **argv)
 	velocity_odom.setf(std::ios::dec, std::ios::floatfield);
 	velocity_odom.precision(15);
 
-	icp_odom_path << dataset_folder << "radar/"
+	icp_odom_path << dataset_folder << sequence_number + "/radar/"
 				  << "icp.txt";
 	std::ofstream icp_odom(icp_odom_path.str(), std::ios::trunc);
 	icp_odom.setf(std::ios::dec, std::ios::floatfield);
 	icp_odom.precision(15);
 
-	icp_map_path << dataset_folder << "radar/"
+	icp_map_path << dataset_folder << sequence_number + "/radar/"
 				 << "icp_map.txt";
 	std::ofstream icp_map(icp_map_path.str(), std::ios::trunc);
 	icp_map.setf(std::ios::dec, std::ios::floatfield);
 	icp_map.precision(15);
 
-	pcl_info_path << dataset_folder << "radar/"
+	pcl_info_path << dataset_folder << sequence_number + "/radar/"
 				 << "pcl_info.txt";
 	std::ofstream pcl_info(pcl_info_path.str(), std::ios::trunc);
 	pcl_info.setf(std::ios::dec, std::ios::floatfield);
@@ -204,10 +206,12 @@ int main(int argc, char **argv)
 	getline(file, value, '\n'); // 换行
 	firstline(19) = atof(value.c_str());
 #endif
+    float map_vis_size = 0.1;
+    downSizeFilterMapPGO.setLeafSize(map_vis_size, map_vis_size, map_vis_size);
 
 	ros::Publisher pubRadarCloudSurround = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_surround", 100);
 	ros::Publisher pubRadarCloudLocal = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_local", 100);
-	ros::Publisher pubRadarSubMap = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_submap", 100);
+	ros::Publisher pubRadarMap = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_map", 100);
 	ros::Publisher pubOdomGT = n.advertise<nav_msgs::Odometry>("/radar_odom", 100);
 	nav_msgs::Odometry odomGT;
 	odomGT.header.frame_id = "/camera_init";
@@ -225,6 +229,7 @@ int main(int argc, char **argv)
 	pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudSurround(new pcl::PointCloud<pcl::PointXYZI>);
 	pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudLocal(new pcl::PointCloud<pcl::PointXYZI>);
 	pcl::PointCloud<pcl::PointXYZI>::Ptr RadarSubMap(new pcl::PointCloud<pcl::PointXYZI>);
+	pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudMap(new pcl::PointCloud<pcl::PointXYZI>);
 	pcl::PointCloud<pcl::PointXYZI>::Ptr RadarSubMapLocal(new pcl::PointCloud<pcl::PointXYZI>);
 	std::vector<pcl::PointCloud<pcl::PointXYZI>> RadarLocalMap;
 	pcl::PointCloud<pcl::PointXYZI>::Ptr LocalMap_cloud_src(new pcl::PointCloud<pcl::PointXYZI>);
@@ -300,29 +305,29 @@ int main(int argc, char **argv)
 #endif
 
 #ifdef USE_BIN_FILES
-		radar_currdata_path << dataset_folder << "data/" << "radar_pointcloud_"
-							<< order << ".bin";
+		radar_currdata_path << dataset_folder <<  sequence_number +"/radar_bin/"
+							<< std::setfill('0') << std::setw(5) << order << ".bin";
 
 		if (order == 0)
 		{
-			radar_lastdata_path << dataset_folder << "data/" << "radar_pointcloud_"
-								<< order << ".bin";
+			radar_lastdata_path << dataset_folder <<  sequence_number +"/radar_bin/"
+							<< std::setfill('0') << std::setw(5) << order << ".bin";
 		}
 		else
 		{
-			radar_lastdata_path << dataset_folder << "data/" << "radar_pointcloud_"
-								<< order - 1 << ".bin";
+			radar_lastdata_path << dataset_folder << sequence_number +"/radar_bin/"
+							<< std::setfill('0') << std::setw(5) << order - 1 << ".bin";
 		}
-		radar_nextdata_path << dataset_folder << "data/" << "radar_pointcloud_"
-							<< order + 1 << ".bin";	
+		radar_nextdata_path << dataset_folder << sequence_number +"/radar_bin/"
+							<< std::setfill('0') << std::setw(5) << order + 1 << ".bin";
 
 		std::vector<float> radarcurr_data = read_radar_data(radar_currdata_path.str());
 
 		std::vector<float> radarlast_data = read_radar_data(radar_lastdata_path.str());
-		std::cout << "totally " << radarcurr_data.size() / 5.0 << " points in " << std::setfill('0')
+		std::cout << "totally " << radarcurr_data.size() / 8.0 << " points in " << std::setfill('0')
 				  << std::setw(5) << order << ".bin" << '\n';
 
-		pcl_info << radarcurr_data.size() / 5.0 << std::endl;
+		pcl_info << radarcurr_data.size() / 8.0 << std::endl;
 
 		// /* add cloud_src */
 		// for (std::size_t i = 0; i < radarcurr_data.size(); i += 7)
@@ -350,38 +355,38 @@ int main(int argc, char **argv)
 		// }
 
 		/* add cloud_src */
-		// int PointsNum = radarcurr_data.size() / 8.0;
-		int PointsNum = radarcurr_data.size() / 5.0;
+		int PointsNum = radarcurr_data.size() / 8.0;
+		// int PointsNum = radarcurr_data.size() / 5.0;
 		std::vector<RadarPoint_Info2> point_src_cloud(PointsNum);
 		std::vector<RadarPoint_Info2> static_point_src_cloud;
 		std::vector<RadarPoint_Info2> dynamic_point_src_cloud;
-		for (std::size_t i = 0; i < radarcurr_data.size(); i += 5)
+		for (std::size_t i = 0; i < radarcurr_data.size(); i += 8)
 		{
 			RadarPoint_Info2 point_src;
-			// point_src.point_pos.x = radarcurr_data[i];
-			// point_src.point_pos.y = radarcurr_data[i + 1];
-			// point_src.point_pos.z = radarcurr_data[i + 2];
-			// point_src.v_r = radarcurr_data[i + 3];
-			// point_src.distance = radarcurr_data[i + 4];
-			// point_src.point_pos.intensity = radarcurr_data[i + 5];
-			// // point_src.power = radarcurr_data[i + 5];
-			// point_src.arfa = radarcurr_data[i + 6];
-			// point_src.beta = radarcurr_data[i + 7];
-			// point_src_cloud[i / 8] = point_src;
-
-
 			point_src.point_pos.x = radarcurr_data[i];
 			point_src.point_pos.y = radarcurr_data[i + 1];
 			point_src.point_pos.z = radarcurr_data[i + 2];
-			point_src.point_pos.intensity = radarcurr_data[i + 3];
-			point_src.v_r = radarcurr_data[i + 4];
-			point_src.distance = std::sqrt(radarcurr_data[i]*radarcurr_data[i] + \
-			radarcurr_data[i+1]*radarcurr_data[i+1] + radarcurr_data[i+2]*radarcurr_data[i+2]);
+			point_src.v_r = radarcurr_data[i + 3];
+			point_src.distance = radarcurr_data[i + 4];
+			point_src.point_pos.intensity = radarcurr_data[i + 5];
+			// point_src.power = radarcurr_data[i + 5];
+			point_src.arfa = radarcurr_data[i + 6];
+			point_src.beta = radarcurr_data[i + 7];
+			point_src_cloud[i / 8] = point_src;
+
+
+			// point_src.point_pos.x = radarcurr_data[i];
+			// point_src.point_pos.y = radarcurr_data[i + 1];
+			// point_src.point_pos.z = radarcurr_data[i + 2];
+			// point_src.point_pos.intensity = radarcurr_data[i + 3];
+			// point_src.v_r = radarcurr_data[i + 4];
+			// point_src.distance = std::sqrt(radarcurr_data[i]*radarcurr_data[i] + \
+			// radarcurr_data[i+1]*radarcurr_data[i+1] + radarcurr_data[i+2]*radarcurr_data[i+2]);
 			
 			// point_src.power = radarcurr_data[i + 5];
-			point_src.arfa = std::atan2(point_src.point_pos.y,point_src.point_pos.x)*180/M_PI;
-			point_src.beta = std::asin(point_src.point_pos.z/point_src.distance)*180/M_PI;
-			point_src_cloud[i / 5] = point_src;
+			// point_src.arfa = std::atan2(point_src.point_pos.y,point_src.point_pos.x)*180/M_PI;
+			// point_src.beta = std::asin(point_src.point_pos.z/point_src.distance)*180/M_PI;
+			// point_src_cloud[i / 5] = point_src;
 		}
 
 		double A_src = 0;
@@ -431,36 +436,34 @@ int main(int argc, char **argv)
 		cout << Vxyz(0) << '\t' << Vxyz(1) << '\t' << Vxyz(2) << endl;
 
 		/* add cloud_tar */
-		PointsNum = radarlast_data.size() / 5.0;
+		PointsNum = radarlast_data.size() / 8.0;
 		std::vector<RadarPoint_Info2> point_tar_cloud(PointsNum);
 		std::vector<RadarPoint_Info2> static_point_tar_cloud;
 		std::vector<RadarPoint_Info2> dynamic_point_tar_cloud;
-		for (std::size_t i = 0; i < radarlast_data.size(); i += 5)
+		for (std::size_t i = 0; i < radarlast_data.size(); i += 8)
 		{
 			RadarPoint_Info2 point_tar;
-			// point_tar.point_pos.x = radarlast_data[i];
-			// point_tar.point_pos.y = radarlast_data[i + 1];
-			// point_tar.point_pos.z = radarlast_data[i + 2];
-			// point_tar.v_r = radarlast_data[i + 3];
-			// point_tar.distance = radarlast_data[i + 4];
-			// point_tar.point_pos.intensity = radarlast_data[i + 5];
-			// // point_tar.power = radarlast_data[i + 5];
-			// point_tar.arfa = radarlast_data[i + 6];
-			// point_tar.beta = radarcurr_data[i + 7];
-			// point_tar_cloud[i / 8] = point_tar;
-
 			point_tar.point_pos.x = radarlast_data[i];
 			point_tar.point_pos.y = radarlast_data[i + 1];
 			point_tar.point_pos.z = radarlast_data[i + 2];
-			point_tar.point_pos.intensity = radarlast_data[i + 3];
-			point_tar.v_r = radarlast_data[i + 4];
-			point_tar.distance = std::sqrt(radarlast_data[i]*radarlast_data[i] + \
-			radarlast_data[i+1]*radarlast_data[i+1] + radarlast_data[i+2]*radarlast_data[i+2]);
-			
-			// point_src.power = radarcurr_data[i + 5];
-			point_tar.arfa = std::atan2(point_tar.point_pos.y,point_tar.point_pos.x)*180/M_PI;
-			point_tar.beta = std::asin(point_tar.point_pos.z/point_tar.distance)*180/M_PI;
-			point_tar_cloud[i / 5] = point_tar;
+			point_tar.v_r = radarlast_data[i + 3];
+			point_tar.distance = radarlast_data[i + 4];
+			point_tar.point_pos.intensity = radarlast_data[i + 5];
+			// point_tar.power = radarlast_data[i + 5];
+			point_tar.arfa = radarlast_data[i + 6];
+			point_tar.beta = radarcurr_data[i + 7];
+			point_tar_cloud[i / 8] = point_tar;
+
+			// point_tar.point_pos.x = radarlast_data[i];
+			// point_tar.point_pos.y = radarlast_data[i + 1];
+			// point_tar.point_pos.z = radarlast_data[i + 2];
+			// point_tar.point_pos.intensity = radarlast_data[i + 3];
+			// point_tar.v_r = radarlast_data[i + 4];
+			// point_tar.distance = std::sqrt(radarlast_data[i]*radarlast_data[i] + \
+			// radarlast_data[i+1]*radarlast_data[i+1] + radarlast_data[i+2]*radarlast_data[i+2]);
+			// point_tar.arfa = std::atan2(point_tar.point_pos.y,point_tar.point_pos.x)*180/M_PI;
+			// point_tar.beta = std::asin(point_tar.point_pos.z/point_tar.distance)*180/M_PI;
+			// point_tar_cloud[i / 5] = point_tar;
 		}
 		double A_tar = 0;
 		double b_tar = 0;
@@ -507,18 +510,24 @@ int main(int argc, char **argv)
 
 #ifndef USE_ICP_RESULT
 			// use ICP method and set the parameters of ICP
-			pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp;
-			icp.setInputSource(cloud_src_in);
-			icp.setInputTarget(cloud_tar_in);
+			// pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp;
+			// icp.setInputSource(cloud_src_in);
+			// icp.setInputTarget(cloud_tar_in);
 			// icp.setMaximumIterations(200);
-			icp.align(*Final);
+			// icp.align(*Final);
 
-			std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl;
+			pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> gicp;
+			gicp.setInputTarget(cloud_tar_in);
+			gicp.setInputSource(cloud_src_in);
+			gicp.setCorrespondenceRandomness(5);
+			gicp.align(*Final);
+
+			std::cout << "has converged:" << gicp.hasConverged() << " score: " << gicp.getFitnessScore() << std::endl;
 
 			// output the transformation matrix
-			std::cout << icp.getFinalTransformation() << std::endl;
-			double score = icp.getFitnessScore();
-			Eigen::Matrix<double, 4, 4> icp_result = icp.getFinalTransformation().cast<double>();
+			std::cout << gicp.getFinalTransformation() << std::endl;
+			double score = gicp.getFitnessScore();
+			Eigen::Matrix<double, 4, 4> icp_result = gicp.getFinalTransformation().cast<double>();
 
 #else
 			Eigen::Matrix<double, 20, 1> data = Eigen::Matrix<double, 20, 1>::Zero();
@@ -584,8 +593,16 @@ int main(int argc, char **argv)
 				pointAssociateToMap(&cloud_src_in->points[iterCount], &pointSel);
 				RadarCloudSurround->push_back(pointSel);
 				RadarSubMap->push_back(pointSel);
+				RadarCloudMap->push_back(pointSel);
 			}
 			submap_cnt += 1;
+			downSizeFilterMapPGO.setInputCloud(RadarCloudMap);
+    		downSizeFilterMapPGO.filter(*RadarCloudMap);
+			sensor_msgs::PointCloud2 RadarCloudMapMsg;
+			pcl::toROSMsg(*RadarCloudMap, RadarCloudMapMsg);
+			RadarCloudMapMsg.header.stamp = ros::Time().now();
+			RadarCloudMapMsg.header.frame_id = "/camera_init";
+			pubRadarMap.publish(RadarCloudMapMsg);
 
 			if (submap_cnt == 20)
 			{
@@ -611,11 +628,7 @@ int main(int argc, char **argv)
 					RadarSubMapLocal->push_back(pointSel);
 				}
 
-				sensor_msgs::PointCloud2 RadarCloudSubMapMsg;
-				pcl::toROSMsg(*RadarSubMapLocal, RadarCloudSubMapMsg);
-				RadarCloudSubMapMsg.header.stamp = ros::Time().now();
-				RadarCloudSubMapMsg.header.frame_id = "/camera_init";
-				pubRadarSubMap.publish(RadarCloudSubMapMsg);
+
 				RadarSubMap->clear();
 				RadarSubMapLocal->clear();
 
@@ -765,15 +778,15 @@ int main(int argc, char **argv)
 	velocity_odom.close();
 
 	Eigen::Vector3d T_sum(0, 0, 0);
-	for (int i = 0; i < Icp_Rtrans_result.size() ; i += RESULT_GAP)
+	for (int i = 0; i <= Icp_Rtrans_result.size() - RESULT_GAP; i += RESULT_GAP)
 	{
 		Eigen::Matrix<double, 3, 3> R_curr;
 		Eigen::Vector3d T_curr;
-		// R_curr = Icp_Rtrans_result[i] * Icp_Rtrans_result[i + 1] * Icp_Rtrans_result[i + 2];
-		// T_curr = Icp_Ttrans_result[i] + Icp_Rtrans_result[i] * Icp_Ttrans_result[i + 1] +
-		// 		 Icp_Rtrans_result[i] * Icp_Rtrans_result[i + 1] * Icp_Ttrans_result[i + 2];
-		R_curr = Icp_Rtrans_result[i];
-		T_curr = Icp_Ttrans_result[i];
+		R_curr = Icp_Rtrans_result[i] * Icp_Rtrans_result[i + 1] * Icp_Rtrans_result[i + 2];
+		T_curr = Icp_Ttrans_result[i] + Icp_Rtrans_result[i] * Icp_Ttrans_result[i + 1] +
+				 Icp_Rtrans_result[i] * Icp_Rtrans_result[i + 1] * Icp_Ttrans_result[i + 2];
+		// R_curr = Icp_Rtrans_result[i];
+		// T_curr = Icp_Ttrans_result[i];
 		T_sum = T_sum + T_curr;
 		icp_odom << R_curr(0, 0) << ' '
 				 << R_curr(0, 1) << ' '

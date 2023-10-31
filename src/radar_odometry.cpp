@@ -141,7 +141,11 @@ Eigen::Quaterniond q_w_curr(1, 0, 0, 0);
 Eigen::Vector3d t_w_curr(0, 0, 0);
 Vector3 v_r, sigma_v_r;
 Vector3 gyro_last;
-Vector3 lbr (0.0901, -0.1449, 0.0249); //colo
+// Vector3 lbr (0.0901, -0.1449, 0.0249); //colo
+#ifdef SONGHONG
+Vector3 lbr (3.7759, -0.2495, -0.044); //songhong
+#endif
+
 // 初始化值
 
 int vel_correction_count = 0;
@@ -150,8 +154,8 @@ std::queue<Pose3> odomBuf;
 std::queue<pcl::PointCloud<PointType>> fullResBuf;
 
 Eigen::Matrix<double, 3, 3> Rtrans;
-Eigen::Matrix<double, 3, 3> R_enu_radar;
-Eigen::Matrix<double, 4, 4> T_enu_radar;
+Eigen::Matrix<double, 3, 3> R_ned_radar;
+Eigen::Matrix<double, 4, 4> T_ned_radar;
 Eigen::MatrixXd currOdom;
 nav_msgs::Odometry RadarOdom;
 nav_msgs::Path RadarPath;
@@ -168,7 +172,7 @@ std::vector<std::pair<int,Pose6D>> keyframePoses;
 std::vector<std::pair<int,Pose6D>> keyframePosesUpdated;
 Pose6D odom_pose_prev {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init 
 Pose6D odom_pose_curr {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init pose is zero 
-double keyframeMeterGap;
+double keyframeMeterGap =2.0;
 double movementAccumulation = 1000000.0; // large value means must add the first given frame.
 double scDistThres;
 bool isNowKeyFrame = false;
@@ -187,8 +191,9 @@ NonlinearFactorGraph *graph = new NonlinearFactorGraph();
 gtsam::ISAM2 *isam;
 gtsam::Values isamCurrentEstimate;
 Values initial_values;
+sensor_msgs::ImuPtr imu_msg_new(new sensor_msgs::Imu);
 ImuDataStamped last_imu;
-ImuDataStamped imu_data;
+sensor_msgs::ImuPtr last_imu_msg(new sensor_msgs::Imu);
 reve::RadarEgoVelocityEstimator radar_ego_velocity;
 PreintegrationType *imu_preintegrated_;
 imuBias::ConstantBias prev_bias;
@@ -314,6 +319,126 @@ bool pcl2msgToPcl(const sensor_msgs::PointCloud2 &pcl_msg, pcl::PointCloud<Radar
 void main_task();
 void config_init(radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig &config);
 
+bool pcl2msgToPcl(const sensor_msgs::PointCloud2& pcl_msg, pcl::PointCloud<OculiiPointCloudType>& scan)
+{
+  // TODO: add support for ti_mmwave_rospkg clound type
+
+  std::set<std::string> fields;
+  std::string fields_str = "";
+
+  for (const auto& field : pcl_msg.fields)
+  {
+    fields.emplace(field.name);
+    fields_str += field.name + ", ";
+  }
+
+  if (fields.find("x") != fields.end() && fields.find("y") != fields.end() && fields.find("z") != fields.end() &&
+      fields.find("snr_db") != fields.end() && fields.find("noise_db") != fields.end() &&
+      fields.find("v_doppler_mps") != fields.end())
+  {
+    ROS_INFO_ONCE("[pcl2msgToPcl]: Detected rio pcl format!");
+    pcl::PointCloud<RadarPointCloudType> scan_rio;
+    pcl::PCLPointCloud2 pcl_pc2;
+    pcl_conversions::toPCL(pcl_msg, pcl_pc2);
+    pcl::fromPCLPointCloud2(pcl_pc2, scan_rio);
+    scan.clear();
+    for (const auto& p : scan_rio)
+    {
+      OculiiPointCloudType p_;
+      p_.x             = p.x;
+      p_.y             = p.y;
+      p_.z             = p.z;
+      p_.Alpha        = atan2(p.y,p.x);
+      p_.Beta         = atan2(std::sqrt(p.x * p.x + p.y * p.y), p.z) - M_PI_2; 
+      p_.Power        = p.snr_db;
+      p_.Doppler = p.v_doppler_mps;
+      p_.Range         = p.getVector3fMap().norm();
+      scan.push_back(p_);
+    }
+
+    return true;
+  }
+  else if (fields.find("x") != fields.end() && fields.find("y") != fields.end() && fields.find("z") != fields.end() &&
+           fields.find("intensity") != fields.end() && fields.find("velocity") != fields.end())
+  {
+    ROS_INFO_ONCE("[pcl2msgToPcl]: Detected ti_mmwave_rospkg pcl format!");
+
+    pcl::PointCloud<mmWaveCloudType> scan_mmwave;
+    pcl::PCLPointCloud2 pcl_pc2;
+    pcl_conversions::toPCL(pcl_msg, pcl_pc2);
+    pcl::fromPCLPointCloud2(pcl_pc2, scan_mmwave);
+
+    scan.clear();
+    for (const auto& p : scan_mmwave)
+    {
+      OculiiPointCloudType p_;
+      p_.x             = -p.y;
+      p_.y             = p.x;
+      p_.z             = p.z;
+      p_.Alpha        = atan2(p.y,p.x);
+      p_.Beta         = atan2(std::sqrt(p.x * p.x + p.y * p.y), p.z) - M_PI_2; 
+      p_.Power        = p.intensity;
+      p_.Doppler = p.velocity;
+      p_.Range         = p.getVector3fMap().norm();
+      scan.push_back(p_);
+    }
+    return true;
+  }
+  else if (fields.find("x") != fields.end() && fields.find("y") != fields.end() && fields.find("z") != fields.end() &&
+          fields.find("Doppler") != fields.end() && fields.find("Range") != fields.end() && fields.find("Power") != fields.end()
+          && fields.find("Alpha") != fields.end() && fields.find("Beta") != fields.end())
+  {
+    ROS_INFO_ONCE("[pcl2msgToPcl]: Detected oculii pcl format!");
+
+    scan.clear();
+    pcl::PCLPointCloud2 pcl_pc2;
+    pcl_conversions::toPCL(pcl_msg, pcl_pc2);
+    pcl::fromPCLPointCloud2(pcl_pc2, scan);
+
+    // fix format
+    for (auto& p : scan) p.Range = p.getVector3fMap().norm();
+
+    return true;
+  }
+
+  else if (fields.find("x") != fields.end() && fields.find("y") != fields.end() && fields.find("z") != fields.end() &&
+          fields.find("intensity") != fields.end() && fields.find("range") != fields.end() && fields.find("doppler") != fields.end())
+  {
+    ROS_INFO_ONCE("[pcl2msgToPcl]: Detected ColoRadar pcl format!");
+
+    pcl::PointCloud<ColoRadarPointCloudType> scan_ColoRadar;
+    pcl::PCLPointCloud2 pcl_pc2;
+    pcl_conversions::toPCL(pcl_msg, pcl_pc2);
+    pcl::fromPCLPointCloud2(pcl_pc2, scan_ColoRadar);
+
+    scan.clear();
+    for (const auto& p : scan_ColoRadar)
+    {
+      OculiiPointCloudType p_;
+      p_.x             = p.x;
+      p_.y             = p.y;
+      p_.z             = p.z;
+      p_.Alpha        = atan2(p.y,p.x);
+      p_.Beta         = atan2(std::sqrt(p.x * p.x + p.y * p.y), p.z) - M_PI_2; 
+      p_.Power        = p.intensity;
+      p_.Doppler = p.doppler;
+      p_.Range         = p.range;
+      scan.push_back(p_);
+    }
+    return true;
+
+  }
+
+
+  else
+  {
+    ROS_ERROR_STREAM(
+        "[pcl2msgToPcl]: Unsupported point cloud with fields: " << fields_str.substr(0, fields_str.size() - 2));
+    return false;
+  }
+}
+
+
 gtsam::Pose3 Pose6DtoGTSAMPose3(const Pose6D& p)
 {
     return gtsam::Pose3( gtsam::Rot3::RzRyRx(p.roll, p.pitch, p.yaw), gtsam::Point3(p.x, p.y, p.z) );
@@ -354,9 +479,104 @@ pcl::PointCloud<PointType>::Ptr local2global(const pcl::PointCloud<PointType>::P
     return cloudOut;
 }
 
+// v*cos(beta) = A*cos(arfa+b)
+template <typename PointT> void
+fitSineRansac(const pcl::PointCloud<PointT> &cloud_in,
+					 double &A_best,
+					 double &b_best,
+					 int iterations = 200,
+					 double sigma = 0.5)
+{
+	uint16_t num = cloud_in.points.size();
+	double bestScore = 0.0;
+
+	for (int i = 0; i < iterations; i++)
+	{
+		std::random_device rd;
+		std::default_random_engine eng(rd());
+		std::uniform_int_distribution<int> distr(0, num);
+		int i1 = distr(eng);
+		int i2 = distr(eng);
+
+		const PointT p1 = cloud_in.points[i1];
+		const PointT p2 = cloud_in.points[i2];
+
+		// form the model by two points
+		double k = (p1.Doppler * cos(DEG2RAD(p1.Beta))) / (p2.Doppler * cos(DEG2RAD(p2.Beta)));
+		double b = atan((cos(DEG2RAD(p1.Alpha)) - k * cos(DEG2RAD(p2.Alpha))) / (sin(DEG2RAD(p1.Alpha)) - k * sin(DEG2RAD(p2.Alpha))));
+		double A = cos(DEG2RAD(p1.Beta)) * p1.Doppler / cos((DEG2RAD(p1.Alpha)) + b);
+		double score = 0;
+
+		for (int j = 0; j < num; j++)
+		{
+			PointT pj = cloud_in.points[j];
+			double delta = (cos(DEG2RAD(pj.Beta)) * pj.Doppler) - (A * cos(DEG2RAD(pj.Alpha) + b));
+			if (fabs(delta) < sigma)
+			{
+				score += 1;
+			}
+		}
+
+		if (score > bestScore)
+		{
+			A_best = A;
+			b_best = b;
+			bestScore = score;
+		}
+	}
+}
+
+void velocity_estimation(const sensor_msgs::PointCloud2 &radar_scan_msg,
+                         Vector3 &v_r,
+                         Vector3 &sigma_v_r,
+                         pcl::PointCloud<OculiiPointCloudType>& radar_scan_inlier)
+{
+  double A_src = 0;
+  double b_src = 0;
+  sigma_v_r = {0,0,0};
+  auto radar_scan(new pcl::PointCloud<OculiiPointCloudType>);
+  pcl2msgToPcl(radar_scan_msg, *radar_scan);
+  fitSineRansac(*radar_scan, A_src, b_src, 50);
+  // devide the points
+  for (int i = 0; i < radar_scan->points.size(); i++)
+  {
+    double delta = (cos(DEG2RAD(radar_scan->points[i].Beta)) * radar_scan->points[i].Doppler) -
+                   (A_src * cos(DEG2RAD(radar_scan->points[i].Alpha) + b_src));
+    if (delta > 0.2)
+    {
+      ;
+    }
+    else
+    {
+      radar_scan_inlier.push_back(radar_scan->points[i]);
+    }
+  }
+
+  // use the static points to esitimate velocity
+  int StaticPointNum = radar_scan_inlier.size();
+
+  Eigen::MatrixX3d K(StaticPointNum, 3);
+  Eigen::VectorXd Vr(StaticPointNum);
+
+  for (int i = 0; i < StaticPointNum; i++)
+  {
+    double Ki0 = cos(DEG2RAD(radar_scan_inlier.points[i].Alpha)) * cos(DEG2RAD(radar_scan_inlier.points[i].Beta));
+    double Ki1 = sin(DEG2RAD(radar_scan_inlier.points[i].Alpha)) * cos(DEG2RAD(radar_scan_inlier.points[i].Beta));
+    double Ki2 = sin(DEG2RAD(radar_scan_inlier.points[i].Beta));
+    K(i, 0) = Ki0;
+    K(i, 1) = Ki1;
+    K(i, 2) = Ki2;
+    Vr(i) = radar_scan_inlier.points[i].Doppler;
+  }
+  v_r = - ((K.transpose() * K).inverse() * K.transpose() * Vr);
+}
+
 void initNoises( void )
 {
   Eigen::Matrix<double, 9, 1> initial_state = Eigen::Matrix<double, 9, 1>::Zero();
+  initial_state(3) =  1.46;
+  initial_state(4) =  0.66;
+  initial_state(5) =  0;
   Point3 prior_point(initial_state.head<3>());
   Vector3 prior_euler(initial_state.segment<3>(3));
   Vector3 prior_velocity(initial_state.tail<3>());
@@ -390,7 +610,6 @@ void initNoises( void )
   noiseModel::Diagonal::shared_ptr pose_noise_model = noiseModel::Diagonal::Sigmas(pose_noise_sigma);
   noiseModel::Diagonal::shared_ptr velocity_noise_model = noiseModel::Isotropic::Sigma(3, 0.1);
   noiseModel::Diagonal::shared_ptr bias_noise_model = noiseModel::Isotropic::Sigma(6, 0.001);
-  NonlinearFactorGraph *graph = new NonlinearFactorGraph();
   graph->add(PriorFactor<Pose3>(X(vel_correction_count), prior_pose, pose_noise_model));
   graph->add(PriorFactor<Vector3>(V(vel_correction_count), prior_velocity, velocity_noise_model));
   graph->add(PriorFactor<imuBias::ConstantBias>(B(vel_correction_count), prior_imu_bias, bias_noise_model));
@@ -566,7 +785,6 @@ void process_odom()
   topics.push_back(topic_gps_gt);
 
   rosbag::View view(source_bag, rosbag::TopicQuery(topics));
-  sensor_msgs::ImuPtr imu_msg_new(new sensor_msgs::Imu);
   for (const rosbag::MessageInstance &m : view)
   {
     const auto topic = m.getTopic();
@@ -835,7 +1053,7 @@ std::optional<gtsam::Pose3> doICPVirtualRelative(int _loop_kf_idx, int _curr_kf_
 
   // ICP Settings
   pcl::IterativeClosestPoint<PointType, PointType> icp;
-  icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter
+  icp.setMaxCorrespondenceDistance(50); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter
   icp.setMaximumIterations(100);
   icp.setTransformationEpsilon(1e-6);
   icp.setEuclideanFitnessEpsilon(1e-6);
@@ -936,7 +1154,7 @@ int main(int argc, char **argv)
   //     0, 0, 1;
 
 #ifdef SONGHONG
-  T_enu_radar << 0.99661164, -0.0819717, 0.010574, 3.7759,
+  T_ned_radar << 0.99661164, -0.0819717, 0.010574, 3.7759,
     -0.081822456, -0.9965847, -0.01385872, -0.24948372,
     0.011714, 0.01290198, -0.999848363, -0.0439992834,
     0.0, 0.0, 0.0, 1.0;
@@ -972,6 +1190,14 @@ void main_task()
 
   mutex_1.lock();
 
+  if (!queue_imu.empty())
+  {
+    auto imu_msg = queue_imu.front();
+    imu_preintegrated_->integrateMeasurement(imu_msg.a_b_ib, imu_msg.w_b_ib, imu_msg.dt);
+    gyro_last = imu_msg.w_b_ib;
+    queue_imu.pop();
+  }
+
   if (!queue_radar.empty())
   {
     if (initialed)
@@ -981,37 +1207,39 @@ void main_task()
     src->clear();
 
     auto radar_data_msg = queue_radar.front();
-    sensor_msgs::PointCloud2 inlier_radar_scan;
-    radar_ego_velocity.estimate(radar_data_msg, v_r, sigma_v_r, inlier_radar_scan);
+    pcl::PointCloud<OculiiPointCloudType> scan_OculliRadar;
+    velocity_estimation(radar_data_msg, v_r, sigma_v_r, scan_OculliRadar);
     vel_correction_count++;
-    R_enu_radar = T_enu_radar.topLeftCorner<3,3>();
+    R_ned_radar = T_ned_radar.topLeftCorner<3,3>();
     gyro_last = gyro_last - prev_bias.vector().tail<3>();
     Eigen::Matrix<double, 3, 3> gyro_x;
     gyro_x << 0, -gyro_last(2), gyro_last(1),
         gyro_last(2), 0, -gyro_last(0),
         -gyro_last(1), gyro_last(0), 0;
 
-    v_r = v_r - gyro_x * lbr;
-    v_r = R_enu_radar*v_r;
+    v_r(2) =0;
+    v_r = R_ned_radar*v_r;
 
-    noiseModel::Diagonal::shared_ptr radar_noise_model = noiseModel::Diagonal::Sigmas(sigma_v_r);
+    v_r = v_r - gyro_x * lbr;
+
+    Vector3 vel_noise_sigma;
+    vel_noise_sigma << 0.1, 0.1, 0.2;
+    noiseModel::Diagonal::shared_ptr radar_noise_model = noiseModel::Diagonal::Sigmas(vel_noise_sigma);
     RadarFactor radar_factor(X(vel_correction_count), V(vel_correction_count),
                              v_r,
                              radar_noise_model);
-
-    pcl::PointCloud<OculiiPointCloudType> scan_OculliRadar;
-    pcl::PointCloud<RadarPointCloudType> scan_reve;
-    pcl::PCLPointCloud2 pcl_pc2;
-    pcl_conversions::toPCL(inlier_radar_scan, pcl_pc2);
-    pcl::fromPCLPointCloud2(pcl_pc2, scan_reve);
-    int point_num = scan_reve.size();
+    // pcl::PointCloud<RadarPointCloudType> scan_reve;
+    // pcl::PCLPointCloud2 pcl_pc2;
+    // pcl_conversions::toPCL(inlier_radar_scan, pcl_pc2);
+    // pcl::fromPCLPointCloud2(pcl_pc2, scan_reve);
+    int point_num = scan_OculliRadar.size();
     for (size_t i = 0; i < point_num; i++)
     {
       pcl::PointXYZI p_sel;
-      p_sel.x = scan_reve.points[i].x;
-      p_sel.y = scan_reve.points[i].y;
-      p_sel.z = scan_reve.points[i].z;
-      p_sel.intensity = scan_reve.points[i].snr_db;
+      p_sel.x = scan_OculliRadar.points[i].x;
+      p_sel.y = scan_OculliRadar.points[i].y;
+      p_sel.z = scan_OculliRadar.points[i].z;
+      p_sel.intensity = scan_OculliRadar.points[i].Power;
       src->push_back(p_sel);
     }
 
@@ -1047,80 +1275,70 @@ void main_task()
       std::cout << "has converged:" << gicp.hasConverged() << " score: " << gicp.getFitnessScore() << std::endl;
       std::cout << gicp.getFinalTransformation() << std::endl;
 
-      Eigen::Matrix<double, 4, 4> icp_result = T_enu_radar*gicp.getFinalTransformation().cast<double>()*T_enu_radar.inverse();
+      Eigen::Matrix<double, 4, 4> icp_result = T_ned_radar*gicp.getFinalTransformation().cast<double>()*T_ned_radar.inverse();
       
       currOdom = currOdom * icp_result;
       Rtrans = currOdom.topLeftCorner<3, 3>();
       t_w_curr = currOdom.topRightCorner<3, 1>();
 
       // Get pose transformation
-      float x, y, z, roll, pitch, yaw;
-      Eigen::Affine3f correctionLidarFrame;
-      correctionLidarFrame = gicp.getFinalTransformation();
-      pcl::getTranslationAndEulerAngles(correctionLidarFrame, x, y, z, roll, pitch, yaw);
-      gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
-      gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
-      
+      Eigen::Matrix3d icp_Rtrans = icp_result.topLeftCorner<3, 3>();
+      Eigen::Vector3d icp_Ptrans = icp_result.topRightCorner<3, 1>();
+      Rot3 icp_R(icp_Rtrans);
+      Pose3 icp_pose(icp_R, icp_Ptrans);
+
+      Vector6 icp_noise_sigma;
+      icp_noise_sigma << 0.001, 0.001, 0.001, 0.02, 0.02, 0.02;
+      noiseModel::Diagonal::shared_ptr icp_noise_model = noiseModel::Diagonal::Sigmas(icp_noise_sigma);
+      icp_correction_count = vel_correction_count;
+      BetweenFactor<gtsam::Pose3> odomtry_factor(X(icp_correction_count - 1), X(icp_correction_count), icp_pose, icp_noise_model);
+
+      // 预计分测量值
+      PreintegratedCombinedMeasurements *preint_imu_combined = dynamic_cast<PreintegratedCombinedMeasurements *>(imu_preintegrated_);
+      // IMU 因子
+      // typedef NoiseModelFactor6<Pose3, Vector3, Pose3, Vector3,imuBias::ConstantBias, imuBias::ConstantBias>
+      CombinedImuFactor imu_factor(X(vel_correction_count - 1), V(vel_correction_count - 1),
+                                   X(vel_correction_count), V(vel_correction_count),
+                                   B(vel_correction_count - 1), B(vel_correction_count),
+                                   *preint_imu_combined);
+
+      mtxPosegraph.lock();
+      graph->add(imu_factor);
+      // graph->add(radar_factor);
+      graph->add(odomtry_factor);
+
+
+      // 迭代更新求解imu预测值
+      prop_state = imu_preintegrated_->predict(prev_state, prev_bias);
+      Eigen::Vector3d curr_euler = R2rpy(prop_state.pose().rotation().toQuaternion().toRotationMatrix());
+
+      initial_values.insert(X(vel_correction_count), prop_state.pose());
+      initial_values.insert(V(vel_correction_count), prop_state.v());
+      initial_values.insert(B(vel_correction_count), prev_bias);
+
+      LevenbergMarquardtOptimizer optimizer(*graph, initial_values);
+      result = optimizer.optimize();
+      mtxPosegraph.unlock();
+
+      // 更新下一步预计分初始值
+      // 导航状态
+      prev_state = NavState(result.at<Pose3>(X(vel_correction_count)),
+                            result.at<Vector3>(V(vel_correction_count)));
+      // 偏导数
+      prev_bias = result.at<imuBias::ConstantBias>(B(vel_correction_count));
+      // 更新预计分值
+      imu_preintegrated_->resetIntegrationAndSetBias(prev_bias);
+      // 更新关键帧位姿
+      updatePoses();
+
+      mBuf.lock();
+      odomBuf.push(result.at<Pose3>(X(vel_correction_count)));
+      mBuf.unlock();
+
+      mBuf.lock();
+      fullResBuf.push(*src);
+      mBuf.unlock();
     
-    Vector6 icp_noise_sigma;
-    icp_noise_sigma << 0.001, 0.001, 0.001, 0.02, 0.02, 0.02;
-    noiseModel::Diagonal::shared_ptr icp_noise_model = noiseModel::Diagonal::Sigmas(icp_noise_sigma);
-    icp_correction_count = vel_correction_count;
-    BetweenFactor<gtsam::Pose3> odomtry_factor(X(icp_correction_count-1), X(icp_correction_count), poseFrom.between(poseTo), icp_noise_model);
-
-    // 预计分测量值
-    PreintegratedCombinedMeasurements *preint_imu_combined = dynamic_cast<PreintegratedCombinedMeasurements *>(imu_preintegrated_);
-    // IMU 因子
-    // typedef NoiseModelFactor6<Pose3, Vector3, Pose3, Vector3,imuBias::ConstantBias, imuBias::ConstantBias>
-    CombinedImuFactor imu_factor(X(vel_correction_count - 1), V(vel_correction_count - 1),
-                                 X(vel_correction_count), V(vel_correction_count),
-                                 B(vel_correction_count - 1), B(vel_correction_count),
-                                 *preint_imu_combined);
-
-    mtxPosegraph.lock();
-    graph->add(radar_factor);
-    graph->add(odomtry_factor);
-    graph->add(imu_factor);
-
-    // 迭代更新求解imu预测值
-    prop_state = imu_preintegrated_->predict(prev_state, prev_bias);
-    Eigen::Vector3d curr_euler = R2rpy(prop_state.pose().rotation().toQuaternion().toRotationMatrix());
-
-    initial_values.insert(X(vel_correction_count), prop_state.pose());
-    initial_values.insert(V(vel_correction_count), prop_state.v());
-    initial_values.insert(B(vel_correction_count), prev_bias);
-
-    LevenbergMarquardtOptimizer optimizer(*graph, initial_values);
-    result = optimizer.optimize();
-    mtxPosegraph.unlock();
-
-    // 更新下一步预计分初始值
-    // 导航状态
-    prev_state = NavState(result.at<Pose3>(X(vel_correction_count)),
-                          result.at<Vector3>(V(vel_correction_count)));
-    // 偏导数
-    prev_bias = result.at<imuBias::ConstantBias>(B(vel_correction_count));
-    // 更新预计分值
-    imu_preintegrated_->resetIntegrationAndSetBias(prev_bias);
-    // 更新关键帧位姿
-    updatePoses();
-
-    mBuf.lock();
-    odomBuf.push(result.at<Pose3>(X(vel_correction_count))) ;
-    mBuf.unlock();
-
-    mBuf.lock();
-    fullResBuf.push(*src);
-    mBuf.unlock();
-    
-  }
-
-  if (!queue_imu.empty())
-  {
-    auto imu_msg = queue_imu.front();
-    imu_preintegrated_->integrateMeasurement(imu_msg.a_b_ib, imu_msg.w_b_ib, imu_msg.dt);
-    gyro_last = imu_msg.w_b_ib;
-    queue_imu.pop();
   }
 
   if (!queue_gt.empty())
@@ -1147,6 +1365,7 @@ void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msg)
   if (std::fabs(last_imu.dt) > 1.0e-6)
     dt = (imu_msg->header.stamp - last_imu.time_stamp).toSec();
   last_imu = ImuDataStamped(imu_msg, dt);
+  *last_imu_msg = *imu_msg;
   queue_imu.push(last_imu);
   mutex_1.unlock();
 }
@@ -1154,6 +1373,10 @@ void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msg)
 void callbackRadarScan(const sensor_msgs::PointCloud2ConstPtr &radar_msg)
 {
   mutex_1.lock();
+  double dt = (radar_msg->header.stamp-last_imu.time_stamp).toSec();
+  last_imu_msg->header.stamp = radar_msg->header.stamp;
+  last_imu = ImuDataStamped(last_imu_msg, dt);
+  queue_imu.push(last_imu);
   queue_radar.push(*radar_msg);
   mutex_1.unlock();
 }
