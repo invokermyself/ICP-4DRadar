@@ -2,7 +2,7 @@
 
     <arg name="config" default="params_demo_dataset"/>
     
-    <node name="radar_odometry" pkg="odometry_4dradar" type="radar_odometry" output="screen"> 
+    <!-- <node name="radar_odometry" pkg="odometry_4dradar" type="radar_odometry" output="screen"> 
         <param name="bag_path" type="string" value="/media/invoker/Toshiba_1T/data_jihe/test/2023-06-05-14-58-38.bag" />
         <param name="topic_radar0" type="string" value="/Radar_point_0" />
         <param name="topic_radar1" type="string" value="/Radar_point_1" />
@@ -12,6 +12,20 @@
         <param name="topic_radar5" type="string" value="/Radar_point_5" />
         <param name="topic_gt_twist" type="string" value="/rs/odom" />
         <param name="topic_gt_pose" type="string" value="/rs/gps" />
+        <rosparam file="$(find odometry_4dradar)/config/$(arg config).yaml" command="load"/>
+    </node> -->
+
+    <node name="radar_mix" pkg="odometry_4dradar" type="radar_mix" output="screen"> 
+        <param name="bag_path" type="string" value="/media/invoker/Toshiba_1T/data_jihe/test/2023-06-05-14-58-38.bag" />
+        <param name="topic_radar0" type="string" value="/Radar_point_0" />
+        <param name="topic_radar1" type="string" value="/Radar_point_1" />
+        <param name="topic_radar2" type="string" value="/Radar_point_2" />
+        <param name="topic_radar3" type="string" value="/Radar_point_3" />
+        <param name="topic_radar4" type="string" value="/Radar_point_4" />
+        <param name="topic_radar5" type="string" value="/Radar_point_5" />
+        <param name="topic_gt_twist" type="string" value="/rs/odom" />
+        <param name="topic_gt_pose" type="string" value="/rs/gps" />
+        <param name="topic_imu" type="string" value="/rs/imu" />
         <rosparam file="$(find odometry_4dradar)/config/$(arg config).yaml" command="load"/>
     </node>
 

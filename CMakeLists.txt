@@ -19,6 +19,7 @@ find_package(catkin REQUIRED COMPONENTS
     radar_ego_velocity_estimator
     fast_gicp
     radar_msgs
+    eigen_conversions
 )
 
 find_package(PCL 1.8 REQUIRED)
@@ -44,8 +45,10 @@ catkin_package(
 
 list(REMOVE_ITEM PCL_LIBRARIES "vtkproj4")
 
+add_executable(radar_mix src/radar_mix_node.cpp)
 add_executable(icp4radar src/iterative_closest_point.cpp third_party/ikd-Tree/ikd_Tree.cpp)
 add_executable(radar_odometry src/radar_odometry.cpp third_party/ikd-Tree/ikd_Tree.cpp)
 
+target_link_libraries(radar_mix ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${Boost_LIBRARIES})
 target_link_libraries(icp4radar ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${Boost_LIBRARIES})
 target_link_libraries(radar_odometry ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${Boost_LIBRARIES} ${CERES_LIBRARIES})

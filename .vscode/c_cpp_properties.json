@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "/opt/ros/melodic/include/**",
+                "/home/invoker/catkin_ws/devel/include/**",
+                "/home/invoker/catkin_ws/src/ICP-4DRadar/include/",
+                "/home/invoker/catkin_ws/src/ICP-4DRadar/third_party/ikd-Tree",
+                "/home/invoker/catkin_ws/src/rio/reve/radar_ego_velocity_estimator/include/**",
+                "/home/invoker/catkin_ws/src/fast_gicp/include/**",
+                "/usr/include/**"
+
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "gnu11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "gcc-x64",
+            "configurationProvider": "go2sh.cmake-integration"
+        }
+    ],
+    "version": 4
+}

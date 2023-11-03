@@ -77,47 +77,26 @@ POINT_CLOUD_REGISTER_POINT_STRUCT (ColoRadarPointCloudType,
 
 // clang-format on
 
-double para_q[4] = {0, 0, 0, 1};
-double para_t[3] = {0, 0, 0};
-double output_time = 0;
-double twist_update = 0;
-double pose_update = 0;
-int recv_radar_cnt = 0;
-std::vector<double> radar_update(6);
-std::vector<uint32_t> radar_frame(6);
-
 pcl::PointCloud<pcl::PointXYZI>::Ptr src(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr tar(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudMap(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr RadarCloudLocal(new pcl::PointCloud<pcl::PointXYZI>);
 pcl::PointCloud<pcl::PointXYZI>::Ptr downSizeFilterMap(new pcl::PointCloud<pcl::PointXYZI>);
 
-Eigen::Map<Eigen::Quaterniond> q_last_curr(para_q);
-Eigen::Map<Eigen::Vector3d> t_last_curr(para_t);
-
 // Transformation from current frame to world frame
 Eigen::Quaterniond q_w_curr(1, 0, 0, 0);
 Eigen::Vector3d t_w_curr(0, 0, 0);
+Eigen::Matrix<double, 3, 3> Rtrans;
 
 // init Transformation
-Eigen::Quaterniond q_w_init(0.9994444, -0.00157077, -0.00474173, -0.0329522);
-
-Eigen::Matrix<double, 3, 3> Rtrans;
-Eigen::Matrix<double, 3, 3> R_init;
-std::vector<Eigen::Matrix<double, 4, 4>> T_enu_radar(6);
-
-bool pose_initialed = false;
-bool twist_initialed = false;
 std::mutex mutex_1;
 
 std::queue<ImuDataStamped> queue_imu;
-std::vector<std::queue<radar_msgs::RadarTarget>> queue_radar(6);
-std::queue<nav_msgs::Odometry> queue_odom_twist;
-std::queue<sensor_msgs::NavSatFix> queue_odom_pose;
+std::queue<sensor_msgs::PointCloud2> queue_radar;
+std::queue<nav_msgs::Odometry> queue_odom_pose;
 ImuDataStamped last_imu;
 ImuDataStamped imu_data;
 reve::RadarEgoVelocityEstimator radar_ego_velocity;
-CooTrans gps2xy;
 
 void pointAssociateToMap(PointType const *const pi, PointType *const po)
 {
@@ -188,308 +167,61 @@ std::vector<float> read_radar_featurePoint(const std::string radar_data_path)
 }
 
 void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msgs);
-void callbackRadarScan(const radar_msgs::RadarTargetConstPtr &radar_msg, int radar_no);
-void callbackGtTwist(const nav_msgs::OdometryConstPtr &gt_msg);
-void callbackGtPose(const sensor_msgs::NavSatFixConstPtr &gt_msg);
-bool pcl2msgToPcl(const sensor_msgs::PointCloud2 &pcl_msg, pcl::PointCloud<RadarPointCloudType> &scan);
-void main_task();
-void config_init(radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig &config);
-void RadarPcl2Body(int radar_no);
-static Eigen::Vector3d R2rpy(const Eigen::Matrix3d &R);
+void callbackRadarScan(const sensor_msgs::PointCloud2ConstPtr &radar_msg);
+void callbackGtPose(const nav_msgs::OdometryConstPtr &gt_msg);
 
-int main(int argc, char **argv)
-{
-
-  ros::init(argc, argv, "radar_odometry");
-  ros::NodeHandle n("~");
-  ros::Publisher pubRadarCloudSurround = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_surround", 100);
-  ros::Publisher pubRadarCloudLocal = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_local", 100);
-  ros::Publisher pubgtTwist = n.advertise<nav_msgs::Odometry>("/gt_twsit", 100);
-  ros::Publisher pubgtPose = n.advertise<sensor_msgs::NavSatFix>("/gt_pose", 100);
-  radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig config;
-  config_init(config);
-  radar_ego_velocity.configure(config);
-
-  std::string bag_path;
-  std::string topic_imu;
-  std::vector<std::string> topic_radar(6);
-  std::string topic_gt_twist;
-  std::string topic_gt_pose;
-  n.getParam("bag_path", bag_path);
-  n.getParam("topic_imu", topic_imu);
-  n.getParam("topic_radar0", topic_radar[0]);
-  n.getParam("topic_radar1", topic_radar[1]);
-  n.getParam("topic_radar2", topic_radar[2]);
-  n.getParam("topic_radar3", topic_radar[3]);
-  n.getParam("topic_radar4", topic_radar[4]);
-  n.getParam("topic_radar5", topic_radar[5]);
-  n.getParam("topic_gt_twist", topic_gt_twist);
-  n.getParam("topic_gt_pose", topic_gt_pose);
-
-  // add calib
-  T_enu_radar[0] << 0.6916, -0.7222, -0.009174, 3.65,
-      0.7222, 0.6916, -0.00958, 1.02,
-      0.01326, 0, 0.9999, 0.68,
-      0, 0, 0, 1;
-
-  T_enu_radar[1] << 0.9999, 0.008901, 0.01257, 3.7,
-      -0.0089, 1, -0.0001119, -0.135,
-      -0.01257, 0, 0.9999, 0.67,
-      0, 0, 0, 1;
-
-  T_enu_radar[2] << 0.695, 0.719, 0.01031, 3.65,
-      -0.7189, 0.695, -0.01067, -1.04,
-      -0.01483, 0, 0.9999, 0.66,
-      0, 0, 0, 1;
-
-  T_enu_radar[3] << -0.6785, -0.7328, 0.0522, -1.03,
-      0.7306, -0.6805, -0.05622, 0.86,
-      0.07672, 0, 0.9971, 0.6,
-      0, 0, 0, 1;
-
-  T_enu_radar[4] << -1, -0.004887, -0.005236, -1.165,
-      0.004887, -1, 0.0000256, -0.15,
-      -0.005236, 0, 1, 0.635,
-      0, 0, 0, 1;
-
-  T_enu_radar[5] << -0.7046, 0.7096, -0.0, -1,
-      -0.7096, -0.7046, -0.0, -0.88,
-      -0.0, 0, 1, 0.6,
-      0, 0, 0, 1;
-
-  // read bag
-  rosbag::Bag source_bag;
-  source_bag.open(bag_path, rosbag::bagmode::Read);
-  std::vector<std::string> topics;
-  topics.push_back(topic_imu);
-  topics.push_back(topic_radar[0]);
-  topics.push_back(topic_radar[1]);
-  topics.push_back(topic_radar[2]);
-  topics.push_back(topic_radar[3]);
-  topics.push_back(topic_radar[4]);
-  topics.push_back(topic_radar[5]);
-  topics.push_back(topic_gt_twist);
-  topics.push_back(topic_gt_pose);
-
-  rosbag::View view(source_bag, rosbag::TopicQuery(topics));
-
-  for (const rosbag::MessageInstance &m : view)
-  {
-    const auto topic = m.getTopic();
-    if (topic == topic_imu)
-    {
-      const auto imu_msg_bag = m.instantiate<sensor_msgs::Imu>();
-      if (imu_msg_bag != NULL)
-      {
-        callbackIMU(imu_msg_bag);
-      }
-    }
-
-    else if (topic == topic_radar[0])
-    {
-      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
-      if (radar_scan != NULL)
-        callbackRadarScan(radar_scan, 0);
-    }
-
-    else if (topic == topic_radar[1])
-    {
-      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
-      if (radar_scan != NULL)
-        callbackRadarScan(radar_scan, 1);
-    }
-    else if (topic == topic_radar[2])
-    {
-      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
-      if (radar_scan != NULL)
-        callbackRadarScan(radar_scan, 2);
-    }
-    else if (topic == topic_radar[3])
-    {
-      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
-      if (radar_scan != NULL)
-        callbackRadarScan(radar_scan, 3);
-    }
-    else if (topic == topic_radar[4])
-    {
-      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
-      if (radar_scan != NULL)
-        callbackRadarScan(radar_scan, 4);
-    }
-    else if (topic == topic_radar[5])
-    {
-      const auto radar_scan = m.instantiate<radar_msgs::RadarTarget>();
-      if (radar_scan != NULL)
-        callbackRadarScan(radar_scan, 5);
-    }
-
-    else if (topic == topic_gt_twist)
-    {
-      const auto gt_twist = m.instantiate<nav_msgs::Odometry>();
-
-      if (gt_twist != NULL)
-      {
-        gt_twist->header.frame_id = "/camera_init";
-        pubgtTwist.publish(gt_twist);
-        callbackGtTwist(gt_twist);
-      }
-    }
-
-    else if (topic == topic_gt_pose)
-    {
-      const auto gt_psoe = m.instantiate<sensor_msgs::NavSatFix>();
-      if (gt_psoe != NULL)
-      {
-        gt_psoe->header.frame_id = "/camera_init";
-        pubgtTwist.publish(gt_psoe);
-        callbackGtPose(gt_psoe);
-      }
-    }
-
-    ros::spinOnce();
-
-    main_task();
-
-    uint32_t maxcnt = *max_element(radar_frame.begin(), radar_frame.end());
-    uint32_t mincnt = *min_element(radar_frame.begin(), radar_frame.end());
-    double maxtime = *max_element(radar_update.begin(), radar_update.end());
-    double mintime = *min_element(radar_update.begin(), radar_update.end());
-    
-    if (recv_radar_cnt == 6) // the same seq
-    {
-      
-      double time_diff = fabs(twist_update - *max_element(radar_update.begin(), radar_update.end()));
-      if (time_diff < 0.05)
-      {
-        size_t PointNum = src->size();
-        PointType p_sel;
-        for (size_t i = 0; i < PointNum; i++)
-        {
-          pointAssociateToMap(&src->points[i], &p_sel);
-          RadarCloudMap->push_back(p_sel);
-          RadarCloudLocal->push_back(p_sel);
-        }
-      }
-
-      sensor_msgs::PointCloud2 RadarCloudLocalRos;
-      pcl::toROSMsg(*RadarCloudLocal, RadarCloudLocalRos);
-      RadarCloudLocalRos.header.stamp = ros::Time().now();
-      RadarCloudLocalRos.header.frame_id = "/camera_init";
-      pubRadarCloudLocal.publish(RadarCloudLocalRos);
-      RadarCloudLocal->clear();
-
-      pcl::VoxelGrid<pcl::PointXYZI> sor;
-      sor.setInputCloud(RadarCloudMap);
-      sor.setLeafSize(0.5f, 0.5f, 0.5f);
-      sor.filter(*downSizeFilterMap);
-      sensor_msgs::PointCloud2 RadarCloudSurround;
-      pcl::toROSMsg(*downSizeFilterMap, RadarCloudSurround);
-      RadarCloudSurround.header.stamp = ros::Time().now();
-      RadarCloudSurround.header.frame_id = "/camera_init";
-      pubRadarCloudSurround.publish(RadarCloudSurround);
-
-      src->clear();
-      recv_radar_cnt = 0;
-    }
-
-    else if (recv_radar_cnt > 6)
-    {
-      recv_radar_cnt = 0;
-    }
-  }
-}
-
-void main_task()
+void process_data()
 {
   mutex_1.lock();
-
-  if (!queue_radar[0].empty())
-  {
-    RadarPcl2Body(0);
-  }
-
-  if (!queue_radar[1].empty())
-  {
-    RadarPcl2Body(1);
-  }
-
-  if (!queue_radar[2].empty())
-  {
-    RadarPcl2Body(2);
-  }
-
-  if (!queue_radar[3].empty())
-  {
-    RadarPcl2Body(3);
-  }
-
-  if (!queue_radar[4].empty())
-  {
-    RadarPcl2Body(4);
-  }
-
-  if (!queue_radar[5].empty())
-  {
-    RadarPcl2Body(5);
-  }
 
   if (!queue_imu.empty())
   {
     queue_imu.pop();
   }
 
-  if (!queue_odom_twist.empty())
-  {
-    auto gt_msg = queue_odom_twist.front();
 
-    q_w_curr.x() = gt_msg.pose.pose.orientation.x;
-    q_w_curr.y() = gt_msg.pose.pose.orientation.y;
-    q_w_curr.z() = gt_msg.pose.pose.orientation.z;
-    q_w_curr.w() = gt_msg.pose.pose.orientation.w;
-
-    if (!twist_initialed)
-    {
-      Rtrans = Eigen::Matrix<double, 3, 3>::Identity();
-      R_init = q_w_curr.toRotationMatrix();
-      twist_initialed = true;
-    }
-    else
-    {
-      Rtrans = R_init.transpose() * q_w_curr.toRotationMatrix();
-    }
-    twist_update = gt_msg.header.stamp.toSec();
-    Vector3 eul = R2rpy(q_w_curr.toRotationMatrix());
-
-    queue_odom_twist.pop();
-  }
-
-  if (!queue_odom_pose.empty())
-  {
-    auto gt_pose = queue_odom_pose.front();
-    Vector3 xyz(0, 0, 0);
-    if (!pose_initialed)
-    {
-      gps2xy.SetECEFOw(gt_pose.latitude * M_PI / 180.0, gt_pose.longitude * M_PI / 180.0, gt_pose.altitude);
-      pose_initialed = true;
-    }
-    else
-    {
-      gps2xy.getENH(gt_pose.latitude * M_PI / 180.0, gt_pose.longitude * M_PI / 180.0, gt_pose.altitude, xyz(0), xyz(1), xyz(2));
-    }
-
-    // t_w_curr(0) = xyz(1);
-    // t_w_curr(1) = -xyz(0);
-    // t_w_curr(2) = xyz(2);
-    t_w_curr = xyz;
-    t_w_curr = R_init.transpose() * t_w_curr;
-
-    pose_update = gt_pose.header.stamp.toSec();
-
-    queue_odom_pose.pop();
-  }
 
   mutex_1.unlock();
 }
+
+static Eigen::Vector3d R2rpy(const Eigen::Matrix3d &R)
+{
+  Eigen::Vector3d n = R.col(0);
+  Eigen::Vector3d o = R.col(1);
+  Eigen::Vector3d a = R.col(2);
+
+  Eigen::Vector3d rpy(3);
+  double y = atan2(n(1), n(0));
+  double p = atan2(-n(2), n(0) * cos(y) + n(1) * sin(y));
+  double r = atan2(a(0) * sin(y) - a(1) * cos(y), -o(0) * sin(y) + o(1) * cos(y));
+  rpy(0) = r;
+  rpy(1) = p;
+  rpy(2) = y;
+
+  return rpy / M_PI * 180.0;
+}
+
+int main(int argc, char **argv)
+{
+
+  ros::init(argc, argv, "radar_odometry");
+  ros::NodeHandle n("~");
+
+  ros::Subscriber subRadarScan = n.subscribe<sensor_msgs::PointCloud2>("/radar_cloud_local", 10, callbackRadarScan);
+  ros::Subscriber subImu = n.subscribe<sensor_msgs::Imu>("/imu", 100, callbackIMU);
+  ros::Subscriber subOdom = n.subscribe<nav_msgs::Odometry>("/gt_odom", 100, callbackGtPose);
+
+  ros::Publisher pubRadarCloudSurround = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_surround", 100);
+
+  radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig config;
+  config_init(config);
+  radar_ego_velocity.configure(config);
+
+  process_data();
+
+}
+
+
 
 void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msg)
 {
@@ -502,74 +234,18 @@ void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msg)
   mutex_1.unlock();
 }
 
-void callbackRadarScan(const radar_msgs::RadarTargetConstPtr &radar_msg, int radar_no)
+void callbackRadarScan(const sensor_msgs::PointCloud2ConstPtr &radar_msg)
 {
-  if (radar_no < 0 || radar_no > 5)
-  {
-    std::cout << "wrong radar no. !!!" << std::endl;
-  }
   mutex_1.lock();
-  queue_radar[radar_no].push(*radar_msg);
+  queue_radar.push(*radar_msg);
   mutex_1.unlock();
 }
 
-void callbackGtTwist(const nav_msgs::OdometryConstPtr &gt_msg)
-{
-  mutex_1.lock();
-  queue_odom_twist.push(*gt_msg);
-  mutex_1.unlock();
-}
-
-void callbackGtPose(const sensor_msgs::NavSatFixConstPtr &gt_msg)
+void callbackGtPose(const nav_msgs::OdometryConstPtr &gt_msg)
 {
   mutex_1.lock();
   queue_odom_pose.push(*gt_msg);
   mutex_1.unlock();
-}
-
-void RadarPcl2Body(int radar_no)
-{
-  auto radar_data_msg = queue_radar[radar_no].front();
-  Vector3 v_r, sigma_v_r;
-  sensor_msgs::PointCloud2 inlier_radar_scan;
-  sensor_msgs::PointCloud2 radar_ros_msg;
-  pcl::PointCloud<RadarPointCloudType> radar_pcl;
-  int num = radar_data_msg.targetNum;
-  for (size_t i = 0; i < num; i++)
-  {
-    RadarPointCloudType p_sel;
-    p_sel.x = radar_data_msg.x[i];
-    p_sel.y = radar_data_msg.y[i];
-    p_sel.z = radar_data_msg.z[i];
-    p_sel.snr_db = radar_data_msg.power[i];
-    p_sel.v_doppler_mps = radar_data_msg.v[i];
-    p_sel.noise_db = radar_data_msg.snr[i];
-    p_sel.range = sqrt(pow(p_sel.x, 2) + pow(p_sel.y, 2) + pow(p_sel.z, 2));
-    radar_pcl.push_back(p_sel);
-  }
-  pcl::toROSMsg(radar_pcl, radar_ros_msg);
-  radar_ego_velocity.estimate(radar_ros_msg, v_r, sigma_v_r, inlier_radar_scan);
-  pcl::PointCloud<RadarPointCloudType> scan_ColoRadar;
-  pcl::PCLPointCloud2 pcl_pc2;
-  pcl_conversions::toPCL(inlier_radar_scan, pcl_pc2);
-  pcl::fromPCLPointCloud2(pcl_pc2, scan_ColoRadar);
-  int point_num = scan_ColoRadar.size();
-  for (size_t i = 0; i < point_num; i++)
-  {
-    PointType p_sel;
-    PointType p_sel_body;
-    p_sel.x = scan_ColoRadar.points[i].x;
-    p_sel.y = scan_ColoRadar.points[i].y;
-    p_sel.z = scan_ColoRadar.points[i].z;
-    p_sel.intensity = scan_ColoRadar.points[i].snr_db;
-    pointAssociateToSubMap(&p_sel, &p_sel_body, T_enu_radar[radar_no]);
-    src->push_back(p_sel_body);
-  }
-  radar_update[radar_no] = radar_data_msg.header.stamp.toSec();
-  radar_frame[radar_no] = radar_data_msg.header.seq;
-  recv_radar_cnt++;
-
-  queue_radar[radar_no].pop();
 }
 
 void config_init(radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig &config)
@@ -611,19 +287,3 @@ void config_init(radar_ego_velocity_estimation::RadarEgoVelocityEstimatorConfig 
   config.model_noise_scale_deg = 10.0;
 }
 
-static Eigen::Vector3d R2rpy(const Eigen::Matrix3d &R)
-{
-  Eigen::Vector3d n = R.col(0);
-  Eigen::Vector3d o = R.col(1);
-  Eigen::Vector3d a = R.col(2);
-
-  Eigen::Vector3d rpy(3);
-  double y = atan2(n(1), n(0));
-  double p = atan2(-n(2), n(0) * cos(y) + n(1) * sin(y));
-  double r = atan2(a(0) * sin(y) - a(1) * cos(y), -o(0) * sin(y) + o(1) * cos(y));
-  rpy(0) = r;
-  rpy(1) = p;
-  rpy(2) = y;
-
-  return rpy / M_PI * 180.0;
-}
