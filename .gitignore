@@ -11,3 +11,6 @@ radar_odometry.txt
 # cfg files
 /cfg
 /config
+
+# results files
+/result 

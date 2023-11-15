@@ -26,7 +26,7 @@
         },
 
         {
-            "name": "radar_mix",
+            "name": "radar_odometry",
             "request": "launch",
             "target": "/home/invoker/catkin_ws/src/ICP-4DRadar/launch/radar_odometry.launch",
             "launch": [

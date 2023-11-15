@@ -31,6 +31,7 @@
 #include "gps2local.hpp"
 
 #define RADAR_NUM 6
+#define G 9.78
 
 using namespace std;
 
@@ -283,6 +284,8 @@ int main(int argc, char **argv)
   int radar_new_index = 0;
   double radar_new_timestamp = 0;
   double gtodom_new_timestamp = 0;
+  float r = 100.0; // can change
+  ros::Rate rate(r);
 
   // read bag
   rosbag::Bag source_bag;
@@ -302,6 +305,7 @@ int main(int argc, char **argv)
 
   for (const rosbag::MessageInstance &m : view)
   {
+    rate.sleep();
     const auto topic = m.getTopic();
     radar_new_index = RADAR_NUM;
     if (topic == topic_imu)
@@ -310,6 +314,16 @@ int main(int argc, char **argv)
       if (imu_msg_bag != NULL)
       {
         imu_msg_bag->header.frame_id = "/camera_init";
+        swap(imu_msg_bag->linear_acceleration.x,imu_msg_bag->linear_acceleration.y);
+        swap(imu_msg_bag->angular_velocity.x,imu_msg_bag->angular_velocity.y);
+        imu_msg_bag->linear_acceleration.z *= -1;
+        imu_msg_bag->angular_velocity.z *= -1;
+        imu_msg_bag->linear_acceleration.x *= G;
+        imu_msg_bag->linear_acceleration.y *= G;
+        imu_msg_bag->linear_acceleration.z *= G;
+        imu_msg_bag->angular_velocity.x *= M_PI/180.0f;
+        imu_msg_bag->angular_velocity.y *= M_PI/180.0f;
+        imu_msg_bag->angular_velocity.z *= M_PI/180.0f;
         pubimu.publish(imu_msg_bag);
       }
       topic_new = "imu";
@@ -441,12 +455,8 @@ int main(int argc, char **argv)
       CurrOdom.header.stamp = ros::Time().fromSec(gtodom_new_timestamp);
       pubGtOdom.publish(CurrOdom);
     }
-
-
     process_queue();
-
-    ros::spinOnce();
-
+    // ros::spin();
   }
 
 }
