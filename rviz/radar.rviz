@@ -7,7 +7,9 @@ Panels:
         - /Global Options1
         - /Status1
         - /Grid1
+        - /Path1
         - /Path1/Offset1
+        - /PointCloud22
         - /PointCloud22/Autocompute Value Bounds1
         - /PointCloud23
         - /PointCloud23/Autocompute Value Bounds1
@@ -167,13 +169,13 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: AxisColor
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
       Name: PointCloud2
       Position Transformer: XYZ
-      Queue Size: 10
+      Queue Size: 1
       Selectable: true
       Size (Pixels): 3
       Size (m): 0.10000000149011612
@@ -182,7 +184,7 @@ Visualization Manager:
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: false
       Autocompute Value Bounds:
@@ -195,7 +197,7 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: AxisColor
       Decay Time: 0
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 15
@@ -212,7 +214,7 @@ Visualization Manager:
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Angle Tolerance: 0.10000000149011612
       Class: rviz/Odometry
       Covariance:
@@ -387,25 +389,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 770.18896484375
+      Distance: 82.79853820800781
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 59.76145935058594
-        Y: 53.75657653808594
-        Z: 9.771294593811035
+        X: 0.5925607085227966
+        Y: -14.453410148620605
+        Z: 8.080644607543945
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.5697963237762451
+      Pitch: 1.45979642868042
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 3.1084868907928467
+      Yaw: 3.328481912612915
     Saved: ~
 Window Geometry:
   Displays:

@@ -9,6 +9,21 @@ typedef Eigen::Vector3d Vector3;
 typedef Eigen::Vector4d Vector4;
 typedef pcl::PointXYZI PointType;
 
+typedef enum
+{
+  azimuth   = 0,
+  elevation = 1,
+  x_r       = 2,
+  y_r       = 3,
+  z_r       = 4,
+  peak_db   = 5,
+  r_x       = 6,
+  r_y       = 7,
+  r_z       = 8,
+  v_d       = 9,
+  noise_db  = 10
+} Indices;
+
 typedef struct 
 {
     pcl::PointXYZ point_pos;

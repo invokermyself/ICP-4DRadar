@@ -8,6 +8,7 @@
             },
             "includePath": [
                 "/opt/ros/melodic/include/**",
+                "/usr/include/pcl-1.8/**",
                 "/home/invoker/catkin_ws/devel/include/**",
                 "/home/invoker/catkin_ws/src/ICP-4DRadar/include/",
                 "/home/invoker/catkin_ws/src/ICP-4DRadar/third_party/ikd-Tree",
