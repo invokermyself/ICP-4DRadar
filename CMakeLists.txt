@@ -27,8 +27,12 @@ find_package(catkin REQUIRED COMPONENTS
 find_package(PCL 1.8 REQUIRED)
 find_package(Boost REQUIRED COMPONENTS thread)
 find_package(Ceres REQUIRED)
-FIND_PACKAGE(GTSAM REQUIRED)
+find_package(GTSAM REQUIRED)
 find_package(OpenMP REQUIRED)
+
+set(gtsam_version   ${GTSAM_VERSION_MAJOR}.${GTSAM_VERSION_MINOR}.${GTSAM_VERSION_PATCH})
+message(STATUS "GTSAM Version: ${GTSAM_version}")
+message(STATUS "GTSAM lib: ${GTSAM_LIBS}")
 
 include_directories(
     include
