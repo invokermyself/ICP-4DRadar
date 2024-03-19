@@ -93,12 +93,12 @@ Visualization Manager:
       Use rainbow: true
       Value: false
     - Class: rviz/Axes
-      Enabled: false
+      Enabled: true
       Length: 10
       Name: Axes
       Radius: 0.10000000149011612
       Reference Frame: <Fixed Frame>
-      Value: false
+      Value: true
     - Alpha: 1
       Buffer Length: 1
       Class: rviz/Path
@@ -207,7 +207,7 @@ Visualization Manager:
       Queue Size: 10
       Selectable: true
       Size (Pixels): 3
-      Size (m): 0.07999999821186066
+      Size (m): 0.15000000596046448
       Style: Flat Squares
       Topic: /radar_cloud_surround
       Unreliable: false
@@ -265,8 +265,8 @@ Visualization Manager:
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
-      Line Style: Lines
-      Line Width: 0.029999999329447746
+      Line Style: Billboards
+      Line Width: 1
       Name: Path
       Offset:
         X: 0
@@ -322,8 +322,8 @@ Visualization Manager:
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
-      Line Style: Lines
-      Line Width: 0.029999999329447746
+      Line Style: Billboards
+      Line Width: 1
       Name: Path
       Offset:
         X: 0
@@ -345,8 +345,8 @@ Visualization Manager:
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
-      Line Style: Lines
-      Line Width: 0.029999999329447746
+      Line Style: Billboards
+      Line Width: 1
       Name: Path
       Offset:
         X: 0
@@ -388,25 +388,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 388.8397216796875
+      Distance: 404.0334777832031
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 59.28606033325195
-        Y: -84.18672180175781
-        Z: 8.148391723632812
+        X: 6.801753997802734
+        Y: 6.729159832000732
+        Z: 8.394196510314941
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.5697963237762451
+      Pitch: 1.5297963619232178
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 3.02846360206604
+      Yaw: 4.143455982208252
     Saved: ~
 Window Geometry:
   Displays:

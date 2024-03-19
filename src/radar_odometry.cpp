@@ -43,6 +43,7 @@
 #include <gtsam/navigation/RadarFactor.h>
 #include <gtsam/navigation/GPSFactor.h>
 #include <gtsam/navigation/ImuFactor.h>
+#include <gtsam/navigation/PreintegrationBase.h>
 #include <gtsam/slam/dataset.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/slam/PriorFactor.h>
@@ -56,11 +57,11 @@
 #include "userdefine.h"
 #include "radarFactor.hpp"
 #include "gps2local.hpp"
-#include "radar_msgs/RadarTarget.h"
 #include "ikd_Tree.h"
 #include "radar_ego_velocity_estimator/radar_ego_velocity_estimator.h"
 #include "fast_gicp/gicp/fast_gicp.hpp"
 #include "fast_gicp/gicp/fast_gicp_st.hpp"
+#include <fast_gicp/gicp/fast_apdgicp.hpp>
 #include "radar_msgs/RadarTarget.h"
 #include "aloam_velodyne/tic_toc.h"
 #include "aloam_velodyne/common.h"
@@ -71,8 +72,9 @@
 #define USE_COMBINED
 // #define USE_GICP
 #define USE_NDT
+#define LOOP_USE_ICP
 #define RADAR_NUM 6
-#define G 9.798
+#define G 9.79
 
 using namespace std;
 // using PointVector = KD_TREE<ikdTree_PointType>::PointVector;
@@ -135,6 +137,7 @@ Vector3 gyro_last_ned;
 Vector3 accel_last_ned;
 Vector3 gyro_last_body;
 Eigen::Vector3d vel_Radar;
+Eigen::Vector3d vel_Radar_sigma;
 Vector3 vel_Radar_last(0,0,0);
 // Vector3 lbr (0.0901, -0.1449, 0.0249); //colo
 #ifdef SONGHONG
@@ -142,10 +145,12 @@ Vector3 lbr (3.7759, -0.2495, -0.044); //songhong
 #endif
 
 // 初始化值
-
+// vel esti
+int radar_scan_count = 0;
 int vel_correction_count = 0;
 int icp_correction_count = 0;
-std::queue<Pose3> odomBuf;
+int fault_detect_cnt = 0;
+std::queue<Pose6D> odomBuf;
 std::queue<pcl::PointCloud<PointType>> fullResBuf;
 
 std::vector<Eigen::Matrix<double, 4, 4>> T_body_radar(6);
@@ -158,6 +163,10 @@ Eigen::Matrix<double, 4, 4> T_ned_body;
 Eigen::Matrix<double, 3, 3> R_ned_body;
 CooTrans gps2xy;
 Eigen::MatrixXd currOdom;
+Eigen::MatrixXd currOdom_icp;
+Eigen::MatrixXd currOdom_gicp;
+Eigen::MatrixXd currOdom_ndt;
+Eigen::MatrixXd currOdom_apdgicp;
 nav_msgs::Odometry RadarOdom;
 nav_msgs::Path RadarPath;
 
@@ -170,6 +179,7 @@ Values initial_values;
 
 //loop detect
 int odom_node = 0;
+int loop_currnode = 0;
 std::mutex mKF;
 std::mutex mBuf;
 SCManager scManager;
@@ -181,17 +191,21 @@ pcl::VoxelGrid<PointType> downSizeFilterMapPGO;
 std::vector<pcl::PointCloud<PointType>::Ptr> keyframeLaserClouds;
 std::vector<std::pair<int,Pose6D>> keyframePoses;
 std::vector<std::pair<int,Pose6D>> keyframePosesUpdated;
-Pose6D odom_pose_prev {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init 
-Pose6D odom_pose_curr {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init pose is zero 
-double keyframeMeterGap =2.0;
+Pose6D odom_pose_prev {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init 
+Pose6D odom_pose_curr {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init pose is zero 
+double keyframeMeterGap = 2.0;
 double movementAccumulation = 1000000.0; // large value means must add the first given frame.
 double scDistThres;
 double output_time =0;
+double odom_length=0;
 bool isNowKeyFrame = false;
+std::map<int, int> key_pair;
 
 
 //rosbag
-bool initialed = false;
+bool vel_initialed = false;
+bool pcl_initialed = false;
+bool imu_initialed = false;
 bool pose_initialed = false;
 bool twist_initialed = false;
 std::mutex mutex_rawdata;
@@ -202,6 +216,7 @@ std::queue<ImuDataStamped> queue_imu;
 std::vector<std::queue<radar_msgs::RadarTarget>> queue_radar(6);
 std::vector<pcl::PointCloud<OculiiPointCloudType>> radar_body(6);
 std::vector<Eigen::Vector3d> radar_vel(6);
+std::vector<Eigen::Vector3d> radar_vel_sigma(6);
 std::queue<sensor_msgs::NavSatFix> queue_odom_pose;
 std::queue<nav_msgs::Odometry> queue_odom_twist;
 ImuDataStamped last_imu;
@@ -211,7 +226,10 @@ unordered_map<int,double> scanned_map;
 std::queue<ImuDataStamped> imu_ned;
 std::queue<nav_msgs::Odometry> gt_odom;
 std::queue<pair<int,Eigen::Vector3d>> radar_ego_vel;
-std::queue<pcl::PointCloud<OculiiPointCloudType>> radar_scan;
+std::queue<pair<int,Eigen::Vector3d>> radar_ego_vel_sigma;
+std::queue<pcl::PointCloud<OculiiPointCloudType>> all_radar_scan;
+std::queue<pcl::PointCloud<OculiiPointCloudType>> fov_radar_scan;
+
 
 PreintegrationType *imu_preintegrated_;
 imuBias::ConstantBias prev_bias;
@@ -221,10 +239,18 @@ NavState prop_state;
 std::mutex mtxPosegraph;
 std::mutex mtxRecentPose;
 
+// param
+double bag_start;
+double bag_duration;
+double fov_radar_new_timestamp = 0;
+int vel_correction_freq;
+bool save_keyframe;
 std::string bag_path;
+std::string bag_name;
 std::string output_path;
 std::string topic_new;
 std::string topic_imu;
+
 std::vector<std::string> topic_radar(6);
 std::string topic_gt_twist;
 std::string topic_gt_pose;
@@ -246,8 +272,6 @@ ros::Publisher pubPathAftPGO_woLoop;
 KalmanInfo KF_Fliter;
 FILE *fp;
 
-string radar_vel_filter_path = "/home/invoker/catkin_ws/src/ICP-4DRadar/result/data_jihe/vel_filter.txt";
-std::ofstream radar_vel_filter(radar_vel_filter_path, std::ios::trunc);
 
 void pointAssociateToMap(PointType const *const pi, PointType *const po)
 {
@@ -479,6 +503,7 @@ Pose6D GTSAMPose3toPose6D(const gtsam::Pose3& p)
   rtval.roll = p.rotation().roll();
   rtval.pitch = p.rotation().pitch();
   rtval.yaw = p.rotation().yaw();
+  rtval.time = fov_radar_new_timestamp;
   return rtval;
 } // GTSAMPose3toPose6D
 
@@ -499,7 +524,8 @@ pcl::PointCloud<PointType>::Ptr local2global(const pcl::PointCloud<PointType>::P
     int cloudSize = cloudIn->size();
     cloudOut->resize(cloudSize);
 
-    Eigen::Affine3f transCur = pcl::getTransformation(tf.x, tf.y, tf.z, tf.roll, tf.pitch, tf.yaw);
+    // Eigen::Affine3f transCur = pcl::getTransformation(tf.x, tf.y, tf.z, tf.roll, tf.pitch, tf.yaw);
+    Eigen::Affine3f transCur = pcl::getTransformation(tf.x, -tf.y, -tf.z, tf.roll, -tf.pitch, -tf.yaw);
 
     int numberOfCores = 12;
 #pragma omp parallel for num_threads(numberOfCores)
@@ -507,8 +533,8 @@ pcl::PointCloud<PointType>::Ptr local2global(const pcl::PointCloud<PointType>::P
     {
         const auto &pointFrom = cloudIn->points[i];
         cloudOut->points[i].x = transCur(0,0) * pointFrom.x + transCur(0,1) * pointFrom.y + transCur(0,2) * pointFrom.z + transCur(0,3);
-        cloudOut->points[i].y = transCur(1,0) * pointFrom.x + transCur(1,1) * pointFrom.y + transCur(1,2) * pointFrom.z + transCur(1,3);
-        cloudOut->points[i].z = transCur(2,0) * pointFrom.x + transCur(2,1) * pointFrom.y + transCur(2,2) * pointFrom.z + transCur(2,3);
+        cloudOut->points[i].y = -(transCur(1,0) * pointFrom.x + transCur(1,1) * pointFrom.y + transCur(1,2) * pointFrom.z + transCur(1,3));
+        cloudOut->points[i].z = -(transCur(2,0) * pointFrom.x + transCur(2,1) * pointFrom.y + transCur(2,2) * pointFrom.z + transCur(2,3));
         cloudOut->points[i].intensity = pointFrom.intensity;
     }
 
@@ -623,13 +649,64 @@ bool solve3DLsq(const Eigen::MatrixXd& radar_data,
   return false;
 }
 
+bool solve2DLsq(const Eigen::MatrixXd& radar_data, 
+                Vector3& v_r, 
+                Vector3& sigma_v_r, 
+                bool estimate_sigma)
+{
+  MatrixXd H(radar_data.rows(), 2);
+  Eigen::Matrix3d P_v_r;
+  H.col(0)         = radar_data.col(0);
+  H.col(1)         = radar_data.col(1);
+  const MatrixXd HTH = H.transpose() * H;
+
+  const Vector y = radar_data.col(3);
+
+  Eigen::JacobiSVD<MatrixXd> svd(HTH);
+  double cond = svd.singularValues()(0) / svd.singularValues()(svd.singularValues().size() - 1);
+
+  if (std::fabs(cond) < 1.0e3)
+  {
+    v_r.head<2>() = (HTH).ldlt().solve(H.transpose() * y);
+    v_r(2)=0.0;
+    // v_r = H.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(y);
+
+    if (estimate_sigma)
+    {
+      const Vector e    = H * v_r.head<2>() - y;
+      P_v_r.topLeftCorner<2,2>() = (e.transpose() * e).x() * (HTH).inverse() / (H.rows() - 2);
+      sigma_v_r = Vector3(P_v_r(0, 0), P_v_r(1, 1), 0);
+
+      const Vector3 offset =
+          Vector3(0.05,0.05,0.05)
+              .array()
+              .square();
+      P_v_r += offset.asDiagonal();
+
+      // check diagonal for valid estimation result
+      if (sigma_v_r.x() >= 0.0 && sigma_v_r.y() >= 0.0 && sigma_v_r.z() >= 0.0)
+      {
+        sigma_v_r = sigma_v_r.array().sqrt();
+        if (sigma_v_r.x() < 0.2 && sigma_v_r.y() < 0.2 &&
+            sigma_v_r.z() < 0.2)
+          return true;
+      }
+    }
+    else
+    {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 template <typename PointT> void
 velocity_estimation(const PointT &radar_scan_msg,
                          Vector3 &v_r,
-                         Vector3 &sigma_v_r,
+                         Vector3 &v_r_noisy,
                          pcl::PointCloud<OculiiPointCloudType>& radar_scan_inlier)
 {
-  sigma_v_r = {0,0,0};
   Matrix3 P_v_r;
   pcl::PointCloud<OculiiPointCloudType> radar_scan;
   radar_scan_inlier.clear();
@@ -673,8 +750,8 @@ velocity_estimation(const PointT &radar_scan_msg,
       const size_t n = v_dopplers.size() * (1.0 - 0.4);
       std::nth_element(v_dopplers.begin(), v_dopplers.begin() + n, v_dopplers.end());
       const auto median = v_dopplers[n];
-
-      if (median < 0.05)
+      // std::cout << "Median: " << median << endl;
+      if (median < 0.07)
       {
         ROS_INFO_STREAM_THROTTLE(0.5, "[velocity_estimation]:Zero velocity detected!");
 
@@ -723,7 +800,7 @@ velocity_estimation(const PointT &radar_scan_msg,
               radar_data_iter.row(i) = radar_data.row(idx.at(i));
             }
 
-            if (solve3DLsq(radar_data_iter, v_r, P_v_r, false))
+            if (solve2DLsq(radar_data_iter, v_r, v_r_noisy, false))
             {
               const Vector err = (y_all - H_all * v_r).array().abs();
               std::vector<uint> inlier_idx;
@@ -746,7 +823,8 @@ velocity_estimation(const PointT &radar_scan_msg,
           for (uint i = 0; i < inlier_idx_best.size(); ++i)
             radar_data_inlier.row(i) = radar_data.row(inlier_idx_best.at(i));
 
-          solve3DLsq(radar_data_inlier, v_r, P_v_r, true);
+          solve2DLsq(radar_data_inlier, v_r, v_r_noisy, true);
+
         }
 
         for (const auto &index : inlier_idx_best)
@@ -755,7 +833,47 @@ velocity_estimation(const PointT &radar_scan_msg,
         }
       }
     }
-  sigma_v_r = Vector3(P_v_r(0, 0), P_v_r(1, 1), P_v_r(2, 2)).array().sqrt();
+}
+
+void updatePoses(void)
+{
+    mKF.lock();
+    for (int key_idx=0,node_idx=0; node_idx < int(result.size()); node_idx++)
+    {
+      if(key_idx < int(keyframePosesUpdated.size()) && node_idx == keyframePosesUpdated[key_idx].first)
+      {
+        Pose6D& p = keyframePosesUpdated[key_idx].second;
+        p.x = result.at<gtsam::Pose3>(X(node_idx)).translation().x();
+        p.y = result.at<gtsam::Pose3>(X(node_idx)).translation().y();
+        p.z = result.at<gtsam::Pose3>(X(node_idx)).translation().z();
+        p.roll = result.at<gtsam::Pose3>(X(node_idx)).rotation().roll();
+        p.pitch = result.at<gtsam::Pose3>(X(node_idx)).rotation().pitch();
+        p.yaw = result.at<gtsam::Pose3>(X(node_idx)).rotation().yaw();
+        key_idx++;
+      }
+    }
+    mKF.unlock();
+
+    mtxRecentPose.lock();
+    // if(isamCurrentEstimate.size() > 0)
+    // {
+    //   const gtsam::Pose3& lastOptimizedPose = isamCurrentEstimate.at<gtsam::Pose3>(int(isamCurrentEstimate.size())-1);
+    // }
+
+    mtxRecentPose.unlock();
+} // updatePoses
+
+void runISAM2opt(void)
+{
+    // called when a variable added
+    isam->update(*graph, initial_values);
+    isam->update();
+
+    graph->resize(0);
+    initial_values.clear();
+
+    isamCurrentEstimate = isam->calculateEstimate();
+    updatePoses();
 }
 
 void initNoises( void )
@@ -763,13 +881,18 @@ void initNoises( void )
   Eigen::Matrix<double, 9, 1> initial_state = Eigen::Matrix<double, 9, 1>::Zero();
   Point3 prior_point(initial_state.head<3>());
   Vector3 prior_euler(initial_state.segment<3>(3));
+  // Vector3 prior_euler(Vector3(1.11,0.09,0.58));
+    // Vector3 prior_velocity(Vector3(1.35,0,0));
   Vector3 prior_velocity(initial_state.tail<3>());
   Rot3 prior_rotation = Rot3::ypr(degree2rad(prior_euler(0)),
                                   degree2rad(prior_euler(1)),
                                   degree2rad(prior_euler(2)));
   Pose3 prior_pose(prior_rotation, prior_point); // 初始位姿
+  Vector6 bias_init;
+  // bias_init << 0.000142,0.0002,0.018,-0.000035,-0.00008,-0.00009;
+  bias_init << 0.0,0.0,0.0,-0.0,-0.0,-0.0;
+  imuBias::ConstantBias prior_imu_bias(bias_init); // 残差
 
-  imuBias::ConstantBias prior_imu_bias; // 残差，默认设为0
   NavState prior_nav(prior_pose, prior_velocity);
 
   Eigen::Matrix3d bRn = prior_nav.R();
@@ -797,6 +920,7 @@ void initNoises( void )
   graph->add(PriorFactor<Pose3>(X(vel_correction_count), prior_pose, pose_noise_model));
   graph->add(PriorFactor<Vector3>(V(vel_correction_count), prior_velocity, velocity_noise_model));
   graph->add(PriorFactor<imuBias::ConstantBias>(B(vel_correction_count), prior_imu_bias, bias_noise_model));
+  // runISAM2opt();
   // 使用传感器信息构建IMU的噪声模型
   double accel_noise_sigma = 0.00049;
   double gyro_noise_sigma = 0.0000174444;
@@ -810,14 +934,15 @@ void initNoises( void )
   Matrix33 bias_omega_cov = Matrix33::Identity(3, 3) * pow(gyro_bias_rw_sigma, 2);
   Matrix66 bias_acc_omega_int = Matrix66::Identity(6, 6) * 1e-5; // 积分骗到误差
 
-  boost::shared_ptr<PreintegratedCombinedMeasurements::Params> p = PreintegratedCombinedMeasurements::Params::MakeSharedD();
-  // MakeSharedD:NED坐标系，g默认为 9.81，这里设置为0
-  // MakeSharedU：NEU坐标系，g默认为 9.81
 
   gyro_last_ned = Vector3(0.0, 0.0, 0.0);
   accel_last_ned = Vector3(0.0, 0.0, 0.0);
   gyro_last_body = Vector3(0.0, 0.0, 0.0);
   Vector3 lbr(0.0901, -0.1449, 0.0249); // colo
+
+  boost::shared_ptr<PreintegratedCombinedMeasurements::Params> p = PreintegratedCombinedMeasurements::Params::MakeSharedD();
+  // MakeSharedD:NED坐标系，g默认为 9.81
+  // MakeSharedU：ENU坐标系，g默认为 9.81
 
   // 设置预积分分参数
   p->accelerometerCovariance = measured_acc_cov;
@@ -828,6 +953,11 @@ void initNoises( void )
   p->biasAccCovariance = bias_acc_cov;
   p->biasAccOmegaInt = bias_acc_omega_int;
   p->biasOmegaCovariance = bias_omega_cov;
+  Eigen::Matrix<double, 4, 4> Timu2body = Eigen::Matrix<double, 4, 4>::Identity();
+  Timu2body.topRightCorner<3,1>() = Vector3(1.0, 0.0, -1.8);
+  Pose3 bPs(Timu2body);
+  p->body_P_sensor = bPs;
+
 #ifdef USE_COMBINED
   imu_preintegrated_ = new PreintegratedCombinedMeasurements(p, prior_imu_bias);
 #else
@@ -845,6 +975,11 @@ void performSCLoopClosure(void)
     if( keyframePoses.size() < scManager.NUM_EXCLUDE_RECENT) // do not try too early 
         return;
 
+    if(loop_currnode == keyframePoses.size() - 1)
+    {
+      return;
+    }
+
     auto detectResult = scManager.detectLoopClosureID(); // first: nn index, second: yaw diff
     int SCclosestHistoryFrameID = detectResult.first;
     if( SCclosestHistoryFrameID != -1 ) { 
@@ -856,6 +991,7 @@ void performSCLoopClosure(void)
         scLoopICPBuf.push(std::pair<int, int>(prev_node_idx, curr_node_idx));
         // addding actual 6D constraints in the other thread, icp_calculation.
         mBuf.unlock();
+        loop_currnode = curr_node_idx;
     }
 } // performSCLoopClosure
 
@@ -863,7 +999,7 @@ void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msgs);
 void callbackRadarScan(const radar_msgs::RadarTargetConstPtr &radar_msg, int radar_n);
 void callbackGtPose(const sensor_msgs::NavSatFixConstPtr &gt_msg);
 void callbackGtTwist(const nav_msgs::OdometryConstPtr &gt_msg);
-void process_odom();
+void process_odom(std::vector<std::ofstream *>  file_list);
 
 static Eigen::Vector3d R2rpy(const Eigen::Matrix3d &R)
 {
@@ -882,46 +1018,6 @@ static Eigen::Vector3d R2rpy(const Eigen::Matrix3d &R)
   return rpy / M_PI * 180.0;
 }
 
-void updatePoses(void)
-{
-    mKF.lock();
-    for (int key_idx=0,node_idx=0; node_idx < int(result.size()); node_idx++)
-    {
-      if(key_idx < int(keyframePosesUpdated.size()) && node_idx == keyframePosesUpdated[key_idx].first)
-      {
-        Pose6D& p = keyframePosesUpdated[key_idx].second;
-        p.x = result.at<gtsam::Pose3>(X(node_idx)).translation().x();
-        p.y = result.at<gtsam::Pose3>(X(node_idx)).translation().y();
-        p.z = result.at<gtsam::Pose3>(X(node_idx)).translation().z();
-        p.roll = result.at<gtsam::Pose3>(X(node_idx)).rotation().roll();
-        p.pitch = result.at<gtsam::Pose3>(X(node_idx)).rotation().pitch();
-        p.yaw = result.at<gtsam::Pose3>(X(node_idx)).rotation().yaw();
-        key_idx++;
-      }
-    }
-    mKF.unlock();
-
-    mtxRecentPose.lock();
-    if(isamCurrentEstimate.size() > 0)
-    {
-      const gtsam::Pose3& lastOptimizedPose = isamCurrentEstimate.at<gtsam::Pose3>(int(isamCurrentEstimate.size())-1);
-    }
-
-    mtxRecentPose.unlock();
-} // updatePoses
-
-void runISAM2opt(void)
-{
-    // called when a variable added
-    isam->update(*graph, initial_values);
-    isam->update();
-
-    graph->resize(0);
-    initial_values.clear();
-
-    isamCurrentEstimate = isam->calculateEstimate();
-    updatePoses();
-}
 
 void loopFindNearKeyframesCloud( pcl::PointCloud<PointType>::Ptr& nearKeyframes, const int& key, const int& submap_size, const int& root_kf_idx)
 {
@@ -966,36 +1062,51 @@ std::optional<gtsam::Pose3> doICPVirtualRelative(int _loop_kf_idx, int _curr_kf_
   // pcl::toROSMsg(*targetKeyframeCloud, targetKeyframeCloudMsg);
   // targetKeyframeCloudMsg.header.frame_id = "/camera_init";
   // pubLoopSubmapLocal.publish(targetKeyframeCloudMsg);
-
+  pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
+#ifdef LOOP_USE_ICP
   // ICP Settings
-  pcl::IterativeClosestPoint<PointType, PointType> icp;
-  icp.setMaxCorrespondenceDistance(50); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter
-  icp.setMaximumIterations(100);
-  icp.setTransformationEpsilon(1e-6);
-  icp.setEuclideanFitnessEpsilon(1e-6);
-  icp.setRANSACIterations(0);
+  pcl::IterativeClosestPoint<PointType, PointType> reg;
+  reg.setMaxCorrespondenceDistance(50); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter
+  reg.setMaximumIterations(100);
+  reg.setTransformationEpsilon(1e-6);
+  reg.setEuclideanFitnessEpsilon(1e-6);
+  reg.setRANSACIterations(0);
 
   // Align pointclouds
-  icp.setInputSource(cureKeyframeCloud);
-  icp.setInputTarget(targetKeyframeCloud);
-  pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
-  icp.align(*unused_result);
+  reg.setInputSource(cureKeyframeCloud);
+  reg.setInputTarget(targetKeyframeCloud);
+  reg.align(*unused_result);
+#endif
 
-  float loopFitnessScoreThreshold = 0.4; // user parameter but fixed low value is safe.
-  if (icp.hasConverged() == false || icp.getFitnessScore() > loopFitnessScoreThreshold)
+#ifdef LOOP_USE_NDT
+  // 初始化正态分布变换（NDT）
+  pcl::NormalDistributionsTransform<pcl::PointXYZI, pcl::PointXYZI> reg;
+  reg.setMaxCorrespondenceDistance(50);
+  reg.setTransformationEpsilon(0.01);
+  reg.setStepSize(0.1);
+  reg.setResolution(2.0);
+  reg.setMaximumIterations(100);
+  reg.setInputSource(cureKeyframeCloud);
+  reg.setInputTarget(targetKeyframeCloud);
+  reg.align(*unused_result);
+
+#endif 
+
+  float loopFitnessScoreThreshold = 0.2; // user parameter but fixed low value is safe.
+  if (reg.hasConverged() == false || reg.getFitnessScore() > loopFitnessScoreThreshold)
   {
-    std::cout << "[SC loop] ICP fitness test failed (" << icp.getFitnessScore() << " > " << loopFitnessScoreThreshold << "). Reject this SC loop." << std::endl;
+    std::cout << "[SC loop] ICP fitness test failed (" << reg.getFitnessScore() << " > " << loopFitnessScoreThreshold << "). Reject this SC loop." << std::endl;
     return std::nullopt;
   }
   else
   {
-    std::cout << "[SC loop] ICP fitness test passed (" << icp.getFitnessScore() << " < " << loopFitnessScoreThreshold << "). Add this SC loop." << std::endl;
+    std::cout << "[SC loop] ICP fitness test passed (" << reg.getFitnessScore() << " < " << loopFitnessScoreThreshold << "). Add this SC loop." << std::endl;
   }
 
   // Get pose transformation
   float x, y, z, roll, pitch, yaw;
   Eigen::Affine3f correctionLidarFrame;
-  correctionLidarFrame = icp.getFinalTransformation();
+  correctionLidarFrame = reg.getFinalTransformation();
   pcl::getTranslationAndEulerAngles(correctionLidarFrame, x, y, z, roll, pitch, yaw);
   gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
   gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
@@ -1031,6 +1142,7 @@ void RadarPcl2Body(int radar_no)
   // }
 
   radar_vel[radar_no] = Vr;
+  radar_vel_sigma[radar_no] = Vr_sigma;
   queue_radar[radar_no].pop();
 }
 
@@ -1073,14 +1185,25 @@ void process_queue()
     auto imu_msg_bag = queue_imu.front();
     swap(imu_msg_bag.a_b_ib.x(),imu_msg_bag.a_b_ib.y());
     swap(imu_msg_bag.w_b_ib.x(),imu_msg_bag.w_b_ib.y());
+
+    // imu_msg_bag.a_b_ib.x() *= -1;
+    // imu_msg_bag.w_b_ib.x() *= -1;
     // imu_msg_bag.a_b_ib.y() *= -1;
     // imu_msg_bag.w_b_ib.y() *= -1;
+
     imu_msg_bag.a_b_ib.z() *= -1;
     imu_msg_bag.w_b_ib.z() *= -1;
     imu_msg_bag.a_b_ib *= G;
     gyro_last_ned = imu_msg_bag.w_b_ib;
     accel_last_ned = imu_msg_bag.a_b_ib;
     gyro_last_body = R_ned_body.transpose() * imu_msg_bag.w_b_ib;
+
+    // if((imu_msg_bag.time_stamp.toSec() > fov_radar_new_timestamp) && \
+    //  (imu_msg_bag.time_stamp.toSec() - imu_msg_bag.dt < fov_radar_new_timestamp))
+    // {
+    //   imu_msg_bag.dt = fov_radar_new_timestamp - imu_msg_bag.time_stamp.toSec();
+    //   last_imu.time_stamp.fromSec(fov_radar_new_timestamp); 
+    // }
     mutex_imu.lock();
     imu_ned.push(imu_msg_bag); 
     mutex_imu.unlock();
@@ -1108,7 +1231,7 @@ void process_queue()
     }
     else
     {
-      Rtrans = R_ned_body * R_init.transpose() * q_w_curr.toRotationMatrix() * R_ned_body.transpose();
+      Rtrans = R_ned_body * R_init.transpose() * q_w_curr.toRotationMatrix()  * R_ned_body.transpose();
       q_w_curr = Eigen::Quaterniond(Rtrans);
     }
     queue_odom_twist.pop();
@@ -1118,6 +1241,7 @@ void process_queue()
   {
     auto gt_pose = queue_odom_pose.front();
     Vector3 xyz(0, 0, 0);
+    double height;
     if (!pose_initialed)
     {
       gps2xy.SetECEFOw(gt_pose.latitude * M_PI / 180.0, gt_pose.longitude * M_PI / 180.0, gt_pose.altitude);
@@ -1130,20 +1254,36 @@ void process_queue()
     t_w_curr(0) = xyz(0);//e
     t_w_curr(1) = xyz(1);//n
     t_w_curr(2) = xyz(2);//u
+    height = t_w_curr(2);
     t_w_curr = R_init.transpose() * t_w_curr; //body
     t_w_curr(1)*=-1;
-    t_w_curr(2)*=-1;
+    t_w_curr(2)= height*(-1);
     queue_odom_pose.pop();
   }
 
   mutex_rawdata.unlock();
 }
 
-void process_data( std::string path)
+void process_data( std::vector<std::string>  path_list)
 {
   nav_msgs::Path GtPath;
-  std::ofstream radar_vel_esti(path, std::ios::trunc);
-	radar_vel_esti.setf(std::ios::dec, std::ios::floatfield);
+  std::ofstream radar_vel_esti(path_list[0], std::ios::trunc);
+  std::ofstream radar_vel_filter(path_list[1], std::ios::trunc);
+  std::ofstream ndt_odom(path_list[2], std::ios::trunc);
+  std::ofstream gicp_odom(path_list[3], std::ios::trunc);
+  std::ofstream icp_odom(path_list[4], std::ios::trunc);
+  std::ofstream apdgicp_odom(path_list[5], std::ios::trunc);
+  std::ofstream gt(path_list[6], std::ios::trunc);
+
+  std::vector<std::ofstream *> file_list(5);
+  file_list[0] = &radar_vel_filter;
+  file_list[1] = &icp_odom;
+  file_list[2] = &gicp_odom;
+  file_list[3] = &ndt_odom;
+  file_list[4] = &apdgicp_odom;
+
+
+  radar_vel_esti.setf(std::ios::dec, std::ios::floatfield);
 	radar_vel_esti.precision(15);
   // add calib
   T_body_radar[0] << 0.6916, -0.7222, -0.009174, 3.65,
@@ -1155,6 +1295,11 @@ void process_data( std::string path)
       -0.0089, 1, -0.0001119, -0.135,
       -0.01257, 0, 0.9999, 0.67,
       0, 0, 0, 1;
+
+  // T_body_radar[1] << 0.9999, 0.008901, 0.01257, 2.7,
+  //     -0.0089, 1, -0.0001119, -0.135,
+  //     -0.01257, 0, 0.9999, -1.1,
+  //     0, 0, 0, 1;
 
   T_body_radar[2] << 0.695, 0.719, 0.01031, 3.65,
       -0.7189, 0.695, -0.01067, -1.04,
@@ -1187,7 +1332,8 @@ void process_data( std::string path)
 
       // read bag
   rosbag::Bag source_bag;
-  source_bag.open(bag_path, rosbag::bagmode::Read);
+  std::string bagpath = bag_path + bag_name + ".bag";
+  source_bag.open(bagpath, rosbag::bagmode::Read);
   std::vector<std::string> topics;
   topics.push_back(topic_imu);
   topics.push_back(topic_radar[0]);
@@ -1200,8 +1346,18 @@ void process_data( std::string path)
   topics.push_back(topic_gt_pose);
 
   rosbag::View view(source_bag, rosbag::TopicQuery(topics));
+  auto first_timestamp = ros::TIME_MIN;
   for (const rosbag::MessageInstance &m : view)
   {
+
+    if (first_timestamp == ros::TIME_MIN)
+      first_timestamp = m.getTime();
+
+    if ((m.getTime() - first_timestamp).toSec() < bag_start)
+      continue;
+
+    if ((m.getTime() - first_timestamp).toSec() > bag_duration)
+      break;
     const auto topic = m.getTopic();
     radar_new_index = RADAR_NUM;
     if (topic == topic_imu)
@@ -1235,6 +1391,7 @@ void process_data( std::string path)
         callbackRadarScan(radar_scan, 1);
         radar_new_index = 1;
         radar_new_timestamp = radar_scan->header.stamp.toSec();
+        fov_radar_new_timestamp = radar_new_timestamp;
       }
       topic_new = "radar";
     }
@@ -1291,18 +1448,18 @@ void process_data( std::string path)
     {
       const auto gt_twist = m.instantiate<nav_msgs::Odometry>();
 
-      if (gt_twist != NULL)
+      if (gt_twist != NULL )
       {
         callbackGtTwist(gt_twist);
-        gtodom_new_timestamp = gt_twist->header.stamp.toSec();
+        // gtodom_new_timestamp = gt_twist->header.stamp.toSec();
       }
       topic_new = "gt_twist";
     }
 
-    else if (topic == topic_gt_pose)
+    else if (topic == topic_gt_pose )
     {
       const auto gt_pose = m.instantiate<sensor_msgs::NavSatFix>();
-      if (gt_pose != NULL)
+      if (gt_pose != NULL  )
       {
         callbackGtPose(gt_pose);
         gtodom_new_timestamp = gt_pose->header.stamp.toSec();
@@ -1314,6 +1471,8 @@ void process_data( std::string path)
     {
       pcl::PointCloud<OculiiPointCloudType>::Ptr all_radar_body(new pcl::PointCloud<OculiiPointCloudType>);
       pair<int,Eigen::Vector3d> ego_vel;
+      pair<int,Eigen::Vector3d> ego_vel_sigma;
+
       if(radar_odom_mode == "all")
       {
         for (auto p : scanned_map)
@@ -1359,15 +1518,13 @@ void process_data( std::string path)
         }
         ego_vel.first = temp[2].first;
       }
-      else if (radar_vel_mode == "fov")
-      {
+      else{
         ego_vel.first = 1;
         ego_vel.second = radar_vel[1];
+        ego_vel_sigma.first = 1;
+        ego_vel_sigma.second = radar_vel_sigma[1];
       }
-      else
-      {
-        /* code */
-      }
+
       
       
 
@@ -1377,8 +1534,9 @@ void process_data( std::string path)
       RadarCloudLocalRos.header.frame_id = "/camera_init";
       pubRadarCloudLocal.publish(RadarCloudLocalRos);
       mutex_radar.lock();
+      all_radar_scan.push(*all_radar_body);
+      radar_ego_vel_sigma.push(ego_vel_sigma);
       radar_ego_vel.push(ego_vel);
-      radar_scan.push(*all_radar_body);
       mutex_radar.unlock();
       scanned_map.clear();
     }
@@ -1389,14 +1547,37 @@ void process_data( std::string path)
       scanned_map.insert(radar_curr_scan);
     }
 
-    if(twist_initialed && pose_initialed)
+    // if (topic == topic_radar[1])
+    // {
+    //   pair<int,Eigen::Vector3d> ego_vel;
+    //   pair<int,Eigen::Vector3d> ego_vel_sigma;
+
+    //   ego_vel.first = 1;
+    //   ego_vel.second = radar_vel[1];
+    //   ego_vel_sigma.first = 1;
+    //   ego_vel_sigma.second = radar_vel_sigma[1];
+    //   mutex_radar.lock();
+    //   radar_ego_vel_sigma.push(ego_vel_sigma);
+    //   radar_ego_vel.push(ego_vel);
+    // fov_radar_scan.push(radar_body[1]);
+    //   mutex_radar.unlock();
+    // }
+
+
+    if(twist_initialed && pose_initialed && topic_new == "gt_pose" )
     {
       nav_msgs::Odometry CurrOdom;
       tf::quaternionEigenToMsg(q_w_curr,CurrOdom.pose.pose.orientation);
       tf::pointEigenToMsg(t_w_curr,CurrOdom.pose.pose.position);
       CurrOdom.header.frame_id = "/camera_init";
-      CurrOdom.header.stamp = ros::Time().fromSec(gtodom_new_timestamp);
+      CurrOdom.header.stamp = ros::Time().now();
       pubGtOdom.publish(CurrOdom);
+      gt << fixed;
+      gt << setprecision(6) << gtodom_new_timestamp << " " << setprecision(9) 
+          << t_w_curr(0) << ' '
+          << t_w_curr(1) << ' '
+          << t_w_curr(2) << ' '
+          << q_w_curr.x() << " " << q_w_curr.y() << " " << q_w_curr.z() << " " << q_w_curr.w() << endl;
 
       geometry_msgs::PoseStamped GtPose;
       GtPose.pose = CurrOdom.pose.pose;
@@ -1409,21 +1590,56 @@ void process_data( std::string path)
       mutex_gt.unlock();
     }
     process_queue();
-    process_odom();
+    process_odom(file_list);
   }
+
+  std::string aftpg_path = output_path + bag_name + "_aftpg.txt";
+  std::ofstream aftpg(aftpg_path, std::ios::trunc);
+  aftpg << fixed;
+  for (int i = 0; i < keyframePosesUpdated.size(); i++)
+  {
+    float cy = cos((keyframePosesUpdated[i].second.yaw) * 0.5);
+    float sy = sin((keyframePosesUpdated[i].second.yaw) * 0.5);
+    float cr = cos((keyframePosesUpdated[i].second.roll) * 0.5);
+    float sr = sin((keyframePosesUpdated[i].second.roll) * 0.5);
+    float cp = cos((keyframePosesUpdated[i].second.pitch) * 0.5);
+    float sp = sin((keyframePosesUpdated[i].second.pitch) * 0.5);
+
+    float w = cy * cp * cr + sy * sp * sr;
+    float x = cy * cp * sr - sy * sp * cr;
+    float y = sy * cp * sr + cy * sp * cr;
+    float z = sy * cp * cr - cy * sp * sr;
+    aftpg << setprecision(6) << keyframePosesUpdated[i].second.time << " " << setprecision(9) 
+    // aftpg << setprecision(6) << 0.0 << " " << setprecision(9) 
+          << keyframePosesUpdated[i].second.x << ' '
+          << keyframePosesUpdated[i].second.y << ' '
+          << keyframePosesUpdated[i].second.z << ' '
+          << x << " " << y << " " << z << " " << w << endl;
+          // << keyframePosesUpdated[i].second.roll * 180.0/M_PI << ' '
+          // << keyframePosesUpdated[i].second.pitch * 180.0/M_PI<< ' '
+          // << keyframePosesUpdated[i].second.yaw * 180.0/M_PI << std::endl;
+  }
+  gt.close();
+  aftpg.close();
 }
 
-void process_odom()
+void process_odom(std::vector<std::ofstream *>  file_list)
 {
-	radar_vel_filter.setf(std::ios::dec, std::ios::floatfield);
-	radar_vel_filter.precision(15);
-  
+
   mutex_imu.lock();
-  if (!imu_ned.empty())
+  while (!imu_ned.empty())
   {
     auto imu_msg = imu_ned.front();
-    imu_preintegrated_->integrateMeasurement(imu_msg.a_b_ib, imu_msg.w_b_ib, imu_msg.dt);
-    imu_ned.pop();
+    // if (imu_msg.time_stamp.toSec() < fov_radar_new_timestamp)
+    if(1)
+    {
+      imu_preintegrated_->integrateMeasurement(imu_msg.a_b_ib, imu_msg.w_b_ib, imu_msg.dt);
+      imu_ned.pop();
+    }
+    else
+    {
+      break;
+    }
   }
   mutex_imu.unlock();
 
@@ -1438,44 +1654,233 @@ void process_odom()
   }
   mutex_gt.unlock();
 
-  if (!radar_scan.empty())
+  if(!all_radar_scan.empty())
   {
-    if (initialed)
+    if (pcl_initialed)
     {
       pcl::copyPointCloud(*src, *tar);
     }
-    
+
     src->clear();
     mutex_radar.lock();
     pcl::PointCloud<OculiiPointCloudType>::Ptr scan_Radar(new pcl::PointCloud<OculiiPointCloudType>);
+    *scan_Radar = all_radar_scan.front();
+    all_radar_scan.pop();
     vel_Radar = radar_ego_vel.front().second;
+    vel_Radar_sigma = radar_ego_vel_sigma.front().second;
     vel_Radar(2) = 0.0;//Vz
     int vel_Radar_No = radar_ego_vel.front().first;
-    *scan_Radar = radar_scan.front();
-    radar_scan.pop();
+    // fov_radar_scan.pop();
     radar_ego_vel.pop();
+    radar_ego_vel_sigma.pop();
     mutex_radar.unlock();
-    vel_correction_count++;
-    vel_Radar = R_ned_body * vel_Radar;
-    Vector3 vel_delta = vel_Radar - vel_Radar_last;
-    // fault detect
-    if(((fabs(vel_delta(0)) > 0.3 + fabs(accel_last_ned(0)*0.2)) || \
-    (fabs(vel_delta(1)) > 0.3 + fabs(accel_last_ned(1)*0.2))) && initialed)
+
+    int point_num = scan_Radar->size();
+    for (size_t i = 0; i < point_num; i++)
     {
-      vel_Radar = vel_Radar_last + (accel_last_ned + Vector3(0,0,G) - prev_bias.vector().head<3>())*0.1;
-      vel_Radar_last = vel_Radar;
+      pcl::PointXYZI p_sel;
+      p_sel.x = scan_Radar->points[i].x;
+      p_sel.y = scan_Radar->points[i].y;
+      p_sel.z = scan_Radar->points[i].z;
+      p_sel.intensity = scan_Radar->points[i].Power;
+      src->push_back(p_sel);
+    }
+    // downSizeFilterScan.setLeafSize(0.1,0.1,0.1);
+    // downSizeFilterScan.setInputCloud(src);
+    // downSizeFilterScan.filter(*src);
+
+    if (!pcl_initialed)
+    {
+      pcl::copyPointCloud(*src, *tar);
+      pcl_initialed = true;
+    }
+
+        pcl::PointCloud<pcl::PointXYZI>::Ptr Final(new pcl::PointCloud<pcl::PointXYZI>);
+#ifdef USE_FGICP
+    // GICP
+    fast_gicp::FastGICPSingleThread<pcl::PointXYZI, pcl::PointXYZI> registration;
+    registration.clearTarget();
+    registration.clearSource();
+    std::vector<int> mapping;
+    pcl::removeNaNFromPointCloud(*src, *src, mapping);
+    pcl::removeNaNFromPointCloud(*tar, *tar, mapping);
+    registration.setInputTarget(tar);
+    registration.setInputSource(src);
+    registration.setCorrespondenceRandomness(5);
+    registration.align(*Final);
+    double score = registration.getFitnessScore();
+#endif
+
+    // pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp;
+    // icp.setInputSource(src);
+    // icp.setInputTarget(tar);
+    // // icp.setMaximumIterations(200);
+    // icp.align(*Final);
+
+    // pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> gicp;
+    // gicp.setInputTarget(tar);
+    // gicp.setInputSource(src);
+    // gicp.setCorrespondenceRandomness(5);
+    // gicp.align(*Final);
+
+    // 初始化正态分布变换（NDT）
+    pcl::NormalDistributionsTransform<pcl::PointXYZI, pcl::PointXYZI> ndt;
+    ndt.setTransformationEpsilon(0.01);
+    ndt.setStepSize(0.1);
+    ndt.setResolution(2.0);
+    ndt.setMaximumIterations(30);
+    ndt.setInputSource(src);
+    ndt.setInputTarget(tar);
+    ndt.align(*Final);
+
+    // fast_gicp::FastAPDGICP<pcl::PointXYZI, pcl::PointXYZI>::Ptr apdgicp(new fast_gicp::FastAPDGICP<pcl::PointXYZI, pcl::PointXYZI>());
+    // apdgicp->setNumThreads(0);
+    // apdgicp->setTransformationEpsilon(0.01);
+    // apdgicp->setMaximumIterations(64);
+    // apdgicp->setMaxCorrespondenceDistance( 2.5);
+    // apdgicp->setCorrespondenceRandomness(20);
+    // apdgicp->setDistVar(0.86);
+    // apdgicp->setAzimuthVar(0.5);
+    // apdgicp->setElevationVar(1.0);
+    // apdgicp->setInputSource(src);
+    // apdgicp->setInputTarget(tar);
+    // apdgicp->align(*Final);
+
+#ifdef USE_GICP
+  Eigen::Matrix<double, 4, 4> icp_result = T_ned_body * gicp.getFinalTransformation().cast<double>() * T_ned_body.inverse();
+#endif
+
+#ifdef USE_NDT
+  Eigen::Matrix<double, 4, 4> icp_result = T_ned_body * ndt.getFinalTransformation().cast<double>() * T_ned_body.inverse();
+#endif
+
+
+
+    // std::cout << "has converged:" << registration.hasConverged() << " score: " << registration.getFitnessScore() << std::endl;
+    // std::cout << registration.getFinalTransformation() << std::endl;
+    // currOdom_icp = currOdom_icp * (T_ned_body * icp.getFinalTransformation().cast<double>() * T_ned_body.inverse());
+    // currOdom_gicp = currOdom_gicp * (T_ned_body * gicp.getFinalTransformation().cast<double>() * T_ned_body.inverse());
+    // currOdom_ndt = currOdom_ndt * (T_ned_body * ndt.getFinalTransformation().cast<double>() * T_ned_body.inverse());
+    // currOdom_apdgicp = currOdom_apdgicp * (T_ned_body * apdgicp->getFinalTransformation().cast<double>() * T_ned_body.inverse());
+
+    // Vector3d rpy_icp = R2rpy(currOdom_icp.topLeftCorner<3,3>());
+    // Vector3d rpy_gicp = R2rpy(currOdom_gicp.topLeftCorner<3,3>());
+    // Vector3d rpy_ndt = R2rpy(currOdom_ndt.topLeftCorner<3,3>());
+    // Vector3d rpy_apdgicp = R2rpy(currOdom_apdgicp.topLeftCorner<3,3>());
+
+    // *file_list[1]<< currOdom_icp(0,3) << ' ' <<currOdom_icp(1,3)<< ' '<<currOdom_icp(2,3)<< ' '
+    // << rpy_icp(2) <<' '<< rpy_icp(1) <<' '<< rpy_icp(0) << endl;
+    // *file_list[2]<< currOdom_gicp(0,3) << ' ' <<currOdom_gicp(1,3)<< ' '<<currOdom_gicp(2,3)<< ' '
+    // << rpy_gicp(2) <<' '<< rpy_gicp(1) <<' '<< rpy_gicp(0) << endl;
+    // *file_list[3]<< currOdom_ndt(0,3) << ' ' <<currOdom_ndt(1,3)<< ' '<<currOdom_ndt(2,3)<< ' '
+    // << rpy_ndt(2) <<' '<< rpy_ndt(1) <<' '<< rpy_ndt(0) << endl;
+    // *file_list[4]<< currOdom_apdgicp(0,3) << ' ' <<currOdom_apdgicp(1,3)<< ' '<<currOdom_apdgicp(2,3)<< ' '
+    // << rpy_apdgicp(2) <<' '<< rpy_apdgicp(1) <<' '<< rpy_apdgicp(0) << endl;
+
+
+    currOdom = currOdom * icp_result;
+    // Rtrans = currOdom.topLeftCorner<3, 3>();
+    // t_w_curr = currOdom.topRightCorner<3, 1>();
+
+    // Get pose transformation
+    Eigen::Matrix3d icp_Rtrans = icp_result.topLeftCorner<3, 3>();
+    Eigen::Vector3d icp_Ptrans = icp_result.topRightCorner<3, 1>();
+
+    Rot3 icp_R(icp_Rtrans);
+    Pose3 icp_pose(icp_R, icp_Ptrans);
+    Pose3 curr_pose(currOdom);
+    radar_scan_count ++;
+
+    if(!imu_initialed)
+    {
+      vel_correction_count++;
+    }
+    else if(radar_scan_count % vel_correction_freq == 0)
+    {
+      vel_correction_count++;
     }
     else
     {
-      vel_Radar_last = vel_Radar;
+      return;
     }
+
+
+    Vector6 icp_noise_sigma;
+    icp_noise_sigma << 0.001, 0.001, 0.001, 0.01, 0.01, 0.01;
+    noiseModel::Diagonal::shared_ptr icp_noise_model = noiseModel::Diagonal::Sigmas(icp_noise_sigma);
+    icp_correction_count = vel_correction_count;
+    BetweenFactor<gtsam::Pose3> odomtry_factor(X(icp_correction_count - 1), X(icp_correction_count), icp_pose, icp_noise_model);
+
+    if(sensor_type.find("icp") != string::npos)
+    {
+      graph->add(odomtry_factor);
+    }
+
+
+    
+
+    vel_Radar = R_ned_body * vel_Radar;
+
+    bool static_state = false;
+    if(vel_Radar(0) < 0.01)
+    {
+      static_state = true;
+    }
+
+    // 预计分测量值
+    PreintegratedCombinedMeasurements *preint_imu_combined = dynamic_cast<PreintegratedCombinedMeasurements *>(imu_preintegrated_);
+    // IMU 因子
+    // typedef NoiseModelFactor6<Pose3, Vector3, Pose3, Vector3,imuBias::ConstantBias, imuBias::ConstantBias>
+    CombinedImuFactor imu_factor(X(vel_correction_count - 1), V(vel_correction_count - 1),
+                                 X(vel_correction_count), V(vel_correction_count),
+                                 B(vel_correction_count - 1), B(vel_correction_count),
+                                 *preint_imu_combined);
+
+    // 迭代更新求解imu预测值
+    prop_state = imu_preintegrated_->predict(prev_state, prev_bias);
+    
+    // fault detect
+    bool fault_detect = true;
+    Vector3 gyro_last_ = gyro_last_ned - prev_bias.vector().tail<3>();
+    Eigen::Matrix<double, 3, 3> gyro_x;
+    gyro_x << 0, -gyro_last_(2), gyro_last_(1),
+        gyro_last_(2), 0, -gyro_last_(0),
+        -gyro_last_(1), gyro_last_(0), 0;
+    Vector3 vel_Radar_pred = prop_state.bodyVelocity() + gyro_x*l_ned_radar[vel_Radar_No];
+    Vector3 vel_delta = vel_Radar - vel_Radar_pred;
+    if(((fabs(vel_delta(0)) > 0.1 ) || \
+    (fabs(vel_delta(1)) > 0.1 )) && imu_initialed)
+    {
+      fault_detect = true;
+      fault_detect_cnt ++;
+      std::cout << "vel_Radar fault detect!"<< endl;
+    }
+    else
+    {
+      fault_detect = false;
+      fault_detect_cnt = 0;
+    }
+
+    if(fault_detect_cnt > 5)
+    {
+      fault_detect = false;
+    }
+
     // double Vx = KalmanFilter(&KF_Fliter,vel_Radar(0));
-    radar_vel_filter << vel_Radar(0) << " " 
-    << vel_Radar(1) << " "
-    << vel_Radar(2) << endl;
+    *file_list[0] << vel_Radar_pred(0) << " " 
+    << vel_Radar_pred(1) << " "
+    << vel_Radar_pred(2) << endl;
 
     Vector3 vel_noise_sigma;
-    vel_noise_sigma << 0.1, 0.1, 0.1;
+    if(fault_detect)
+    {
+      vel_noise_sigma << 0.15, 0.15, 0.15;
+    }
+    else
+    {
+      vel_noise_sigma << 0.1, 0.1, 0.1;
+    }
+
     noiseModel::Diagonal::shared_ptr radar_noise_model = noiseModel::Diagonal::Sigmas(vel_noise_sigma);
 
 
@@ -1497,93 +1902,28 @@ void process_odom()
                               radar_noise_model);
     }
 
-    int point_num = scan_Radar->size();
-    for (size_t i = 0; i < point_num; i++)
+    if(static_state)
     {
-      pcl::PointXYZI p_sel;
-      p_sel.x = scan_Radar->points[i].x;
-      p_sel.y = scan_Radar->points[i].y;
-      p_sel.z = scan_Radar->points[i].z;
-      p_sel.intensity = scan_Radar->points[i].Power;
-      src->push_back(p_sel);
-    }
-    // downSizeFilterScan.setLeafSize(0.1,0.1,0.1);
-    // downSizeFilterScan.setInputCloud(src);
-    // downSizeFilterScan.filter(*src);
 
-    if (!initialed)
+      Pose3 static_pose(Eigen::Matrix<double, 4, 4>::Identity());
+      Vector6 static_pose_noisy;
+      static_pose_noisy << 0.0001,0.0001,0.0001,0.0001,0.0001,0.0001;
+      noiseModel::Diagonal::shared_ptr static_noise_model = noiseModel::Diagonal::Sigmas(static_pose_noisy);
+      BetweenFactor<gtsam::Pose3> static_factor(X(vel_correction_count - 1), X(vel_correction_count), static_pose, static_noise_model);
+      graph->add(static_factor);
+    }
+
+    if (!vel_initialed)
     {
-      pcl::copyPointCloud(*src, *tar);
       vel_Radar_last = vel_Radar;
-      initialed = true;
+      vel_initialed = true;
     }
-    pcl::PointCloud<pcl::PointXYZI>::Ptr Final(new pcl::PointCloud<pcl::PointXYZI>);
-#ifdef USE_FGICP
-    // GICP
-    fast_gicp::FastGICPSingleThread<pcl::PointXYZI, pcl::PointXYZI> registration;
-    registration.clearTarget();
-    registration.clearSource();
-    std::vector<int> mapping;
-    pcl::removeNaNFromPointCloud(*src, *src, mapping);
-    pcl::removeNaNFromPointCloud(*tar, *tar, mapping);
-    registration.setInputTarget(tar);
-    registration.setInputSource(src);
-    registration.setCorrespondenceRandomness(5);
-    registration.align(*Final);
-    double score = registration.getFitnessScore();
-#endif
 
-#ifdef USE_GICP
-    pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> registration;
-    registration.setInputTarget(tar);
-    registration.setInputSource(src);
-    registration.setCorrespondenceRandomness(5);
-    registration.align(*Final);
-#endif
+    if(!imu_initialed && vel_correction_count > 600)
+    {
+      imu_initialed = true;
+    }
 
-#ifdef USE_NDT
-    // 初始化正态分布变换（NDT）
-    pcl::NormalDistributionsTransform<pcl::PointXYZI, pcl::PointXYZI> registration;
-    registration.setTransformationEpsilon(0.01);
-    registration.setStepSize(0.1);
-    registration.setResolution(2.0);
-    registration.setMaximumIterations(30);
-    registration.setInputSource(src);
-    registration.setInputTarget(tar);
-    registration.align(*Final);
-#endif
-
-    std::cout << "has converged:" << registration.hasConverged() << " score: " << registration.getFitnessScore() << std::endl;
-    std::cout << registration.getFinalTransformation() << std::endl;
-
-    Eigen::Matrix<double, 4, 4> icp_result = T_ned_body * registration.getFinalTransformation().cast<double>() * T_ned_body.inverse();
-
-    currOdom = currOdom * icp_result;
-    // Rtrans = currOdom.topLeftCorner<3, 3>();
-    // t_w_curr = currOdom.topRightCorner<3, 1>();
-
-    // Get pose transformation
-    Eigen::Matrix3d icp_Rtrans = icp_result.topLeftCorner<3, 3>();
-    Eigen::Vector3d icp_Ptrans = icp_result.topRightCorner<3, 1>();
-
-    Rot3 icp_R(icp_Rtrans);
-    Pose3 icp_pose(icp_R, icp_Ptrans);
-    Pose3 curr_pose(currOdom);
-
-    Vector6 icp_noise_sigma;
-    icp_noise_sigma << 0.001, 0.001, 0.001, 0.01, 0.01, 0.01;
-    noiseModel::Diagonal::shared_ptr icp_noise_model = noiseModel::Diagonal::Sigmas(icp_noise_sigma);
-    icp_correction_count = vel_correction_count;
-    BetweenFactor<gtsam::Pose3> odomtry_factor(X(icp_correction_count - 1), X(icp_correction_count), icp_pose, icp_noise_model);
-
-    // 预计分测量值
-    PreintegratedCombinedMeasurements *preint_imu_combined = dynamic_cast<PreintegratedCombinedMeasurements *>(imu_preintegrated_);
-    // IMU 因子
-    // typedef NoiseModelFactor6<Pose3, Vector3, Pose3, Vector3,imuBias::ConstantBias, imuBias::ConstantBias>
-    CombinedImuFactor imu_factor(X(vel_correction_count - 1), V(vel_correction_count - 1),
-                                 X(vel_correction_count), V(vel_correction_count),
-                                 B(vel_correction_count - 1), B(vel_correction_count),
-                                 *preint_imu_combined);
 
     noiseModel::Diagonal::shared_ptr gps_correction_noise = noiseModel::Isotropic::Sigma(3, 0.1);
     GPSFactor gps_factor(X(vel_correction_count), 
@@ -1596,12 +1936,12 @@ void process_odom()
       graph->add(imu_factor);
     }
 
-    if(sensor_type.find("icp") != string::npos)
-    {
-      graph->add(odomtry_factor);
-    }
+    // if(sensor_type.find("icp") != string::npos)
+    // {
+    //   graph->add(odomtry_factor);
+    // }
 
-    if(sensor_type.find("radar") != string::npos)
+    if(sensor_type.find("radar") != string::npos && !fault_detect)
     {
       graph->add(radar_factor);
     }
@@ -1611,8 +1951,7 @@ void process_odom()
       graph->add(gps_factor);
     }
 
-    // 迭代更新求解imu预测值
-    prop_state = imu_preintegrated_->predict(prev_state, prev_bias);
+
 
     initial_values.insert(X(vel_correction_count), prop_state.pose());
     initial_values.insert(V(vel_correction_count), prop_state.v());
@@ -1620,13 +1959,19 @@ void process_odom()
 
     LevenbergMarquardtOptimizer optimizer(*graph, initial_values);
     result = optimizer.optimize();
+    // 更新下一步预计分初始值
+    // 导航状态 
+    // runISAM2opt();
     mtxPosegraph.unlock();
 
-    // 更新下一步预计分初始值
-    // 导航状态
+
+    // prev_state = NavState(isamCurrentEstimate.at<Pose3>(X(vel_correction_count)),
+    //                       isamCurrentEstimate.at<Vector3>(V(vel_correction_count)));
+    // prev_bias = isamCurrentEstimate.at<imuBias::ConstantBias>(B(vel_correction_count));
+
+
     prev_state = NavState(result.at<Pose3>(X(vel_correction_count)),
                           result.at<Vector3>(V(vel_correction_count)));
-    // 偏导数
     prev_bias = result.at<imuBias::ConstantBias>(B(vel_correction_count));
     // 更新预计分值
     imu_preintegrated_->resetIntegrationAndSetBias(prev_bias);
@@ -1634,16 +1979,15 @@ void process_odom()
     updatePoses();
 
     mBuf.lock();
-    odomBuf.push(result.at<Pose3>(X(vel_correction_count)));
-    mBuf.unlock();
-
-    mBuf.lock();
+    Pose6D pose_tmp = GTSAMPose3toPose6D(result.at<Pose3>(X(vel_correction_count)));
+    odomBuf.push(pose_tmp);
     fullResBuf.push(*src);
     mBuf.unlock();
+
     // 计算角度误差和误差
     Vector3 gtsam_position = prev_state.pose().translation();
     // 位置误差
-    Vector3 position_error = gtsam_position - t_w_curr;
+    Vector2 position_error = (gtsam_position - t_w_curr).head<2>();
     // 误差的范数
     double current_position_error = position_error.norm(); // 归一化
 
@@ -1664,6 +2008,8 @@ void process_odom()
             gtsam_euler(0), gtsam_euler(1), gtsam_euler(2),
             t_w_curr(0), t_w_curr(1), t_w_curr(2),
             gt_euler(0), gt_euler(1), gt_euler(2),
+            // gyro_last_ned(0),gyro_last_ned(1),gyro_last_ned(2),
+            // accel_last_ned(0), accel_last_ned(1), accel_last_ned(2));
             prev_bias.vector()(0), prev_bias.vector()(1), prev_bias.vector()(2),
             prev_bias.vector()(3), prev_bias.vector()(4), prev_bias.vector()(5));
 
@@ -1673,6 +2019,8 @@ void process_odom()
 
 void process_pg()
 {
+  std::string key_pair_path = output_path + bag_name + "_key.txt";
+  std::ofstream key(key_pair_path, std::ios::trunc);
 
   while (1)
   {
@@ -1686,7 +2034,7 @@ void process_pg()
       pcl::copyPointCloud(fullResBuf.front(),*thisKeyFrame);
       fullResBuf.pop();
 
-      Pose6D pose_curr = GTSAMPose3toPose6D(odomBuf.front());
+      Pose6D pose_curr =odomBuf.front();
       odomBuf.pop();
       mBuf.unlock();
       odom_node++;
@@ -1698,7 +2046,7 @@ void process_pg()
       odom_pose_curr = pose_curr;
       double delta_translation = transDiff(odom_pose_prev, odom_pose_curr);
       movementAccumulation += delta_translation;
-
+      odom_length += delta_translation;
       if (movementAccumulation > keyframeMeterGap)
       {
         isNowKeyFrame = true;
@@ -1731,7 +2079,7 @@ void process_pg()
       pcl::RadiusOutlierRemoval<pcl::PointXYZI> outrem; // 创建半径滤波器对象
       outrem.setInputCloud(thisKeyFrame);           // 设置输入点云
       outrem.setRadiusSearch(radius);                // 设置半径为1.0m
-      outrem.setMinNeighborsInRadius(10);     // 设置最小邻接点个数阈值,半径范围内其他点个数少于5的点将被滤除
+      outrem.setMinNeighborsInRadius(5);     // 设置最小邻接点个数阈值,半径范围内其他点个数少于5的点将被滤除
       outrem.filter(*thisKeyFrame);                // 执行滤波
       // path = "/home/invoker/catkin_ws/src/ICP-4DRadar/result/data_jihe/after_KNNFilter.pcd";
       // pcl::io::savePCDFileASCII(path,*thisKeyFrame);
@@ -1742,6 +2090,13 @@ void process_pg()
       downSizeFilterScancontext.setInputCloud(thisKeyFrame);
       downSizeFilterScancontext.filter(*thisKeyFrameDS);
 
+      if(save_keyframe)
+      {
+        std::stringstream filepath;
+        filepath << bag_path << "keyframe/" <<keyframeLaserClouds.size() << ".pcd";
+        pcl::io::savePCDFileASCII(filepath.str(), *thisKeyFrameDS);
+      }
+
       mKF.lock();
       keyframeLaserClouds.push_back(thisKeyFrameDS);
       keyframePoses.push_back(std::pair<int,Pose6D>(odom_node,pose_curr));
@@ -1750,6 +2105,10 @@ void process_pg()
       mKF.unlock();
       const int prev_node_idx = keyframePoses.size() - 2;
       const int curr_node_idx = keyframePoses.size() - 1; // becuase cpp starts with 0 (actually this index could be any number, but for simple implementation, we follow sequential indexing)
+      key_pair.insert(std::pair(curr_node_idx,odom_node));
+
+      key <<  curr_node_idx << ' ' << key_pair[curr_node_idx] << endl;
+      
       // gtsam::Pose3 poseFrom = Pose6DtoGTSAMPose3(keyframePoses.at(prev_node_idx).second);
       // gtsam::Pose3 poseTo = Pose6DtoGTSAMPose3(keyframePoses.at(curr_node_idx).second);
 
@@ -1767,10 +2126,13 @@ void process_pg()
         std::chrono::milliseconds dura(2);
         std::this_thread::sleep_for(dura);
   }
+  key.close();
 } // process_pg
 
 void process_LC_icp(void)
 {
+  std::string lcd_path = output_path + bag_name + "_lcd.txt";
+  std::ofstream lcd(lcd_path, std::ios::trunc);
     while(1)
     {
 		while ( !scLoopICPBuf.empty() )
@@ -1789,18 +2151,28 @@ void process_LC_icp(void)
             auto relative_pose_optional = doICPVirtualRelative(prev_node_idx, curr_node_idx);
             if(relative_pose_optional) {
                 gtsam::Pose3 relative_pose = relative_pose_optional.value();
+                lcd << prev_node_idx << ' ' << curr_node_idx <<' '<< relative_pose.x() << ' '
+                << relative_pose.y() << ' '
+                << relative_pose.z() << ' '
+                << relative_pose.rotation().yaw() * 180/M_PI << ' '
+                << relative_pose.rotation().pitch() * 180/M_PI << ' '
+                << relative_pose.rotation().roll() * 180/M_PI << endl;
+
+                double delta = sqrt(relative_pose.x()*relative_pose.x() + relative_pose.y()*relative_pose.y() + relative_pose.z()*relative_pose.z());
                 Vector6 icp_noise_sigma;
-                icp_noise_sigma << 0.001, 0.001, 0.001, 0.02, 0.02, 0.02;
+                icp_noise_sigma << 0.01, 0.01, 0.01, 0.2, 0.2, 0.2;
                 noiseModel::Diagonal::shared_ptr icp_noise_model = noiseModel::Diagonal::Sigmas(icp_noise_sigma);
                 mtxPosegraph.lock();
-                if(keyframePoses[curr_node_idx].first <= odom_node && sensor_type.find("loop") !=string::npos)
+                if(keyframePoses[curr_node_idx].first <= odom_node && \
+                sensor_type.find("loop") !=string::npos && \
+                delta/odom_length < 0.01)
                 {
                   graph->add(gtsam::BetweenFactor<gtsam::Pose3>(X(keyframePoses[prev_node_idx].first), 
                                                                 X(keyframePoses[curr_node_idx].first), 
                                                                 relative_pose, icp_noise_model));
                 }
                 // runISAM2opt();
-                updatePoses();
+                // updatePoses();
                 mtxPosegraph.unlock();
             }
         }
@@ -1809,11 +2181,13 @@ void process_LC_icp(void)
         std::chrono::milliseconds dura(2);
         std::this_thread::sleep_for(dura);
     }
+    lcd.close();
 } // process_LC_icp
 
 void process_lcd(void)
 {
-    float loopClosureFrequency = 1.0; // can change
+    std::cout << "[process_lcd]: starting..." << endl;
+    float loopClosureFrequency = 0.5; // can change
     ros::Rate rate(loopClosureFrequency);
     while (ros::ok())
     {
@@ -1821,11 +2195,13 @@ void process_lcd(void)
         performSCLoopClosure();
         // performRSLoopClosure(); // TODO
     }
+    std::cout << "[process_lcd]: stoping..." << endl;
 } // process_lcd
 
 void process_viz_map()
 {
-    float vizmapFrequency = 0.1;
+    std::cout << "[process_viz_map]: starting..." << endl;
+    float vizmapFrequency = 0.2;
     int SKIP_FRAMES = 2;
     int counter = 0;
     ros::Rate rate(vizmapFrequency);
@@ -1861,10 +2237,12 @@ void process_viz_map()
           pubRadarSubMap.publish(RadarSubMap);
         }
     }
+    std::cout << "[process_viz_map]: stoping..." << endl;
 }
 
 void process_viz_path(void)
 {
+  std::cout << "[process_viz_path]: starting..." << endl;
     float hz = 10.0;
     ros::Rate rate(hz);
     
@@ -1965,6 +2343,7 @@ void process_viz_path(void)
           br.sendTransform(tf::StampedTransform(transform, odomAftPGO.header.stamp, "/camera_init", "/aft_pgo"));
         }
     }
+    std::cout << "[process_viz_path]: stoping..." << endl;
 }
 
 int main(int argc, char **argv)
@@ -1974,6 +2353,7 @@ int main(int argc, char **argv)
   ros::NodeHandle n("~");
 
   n.getParam("bag_path", bag_path);
+  n.getParam("bag_name", bag_name);
   n.getParam("output_path", output_path);
   n.getParam("topic_imu", topic_imu);
   n.getParam("topic_radar0", topic_radar[0]);
@@ -1987,7 +2367,11 @@ int main(int argc, char **argv)
   n.param<string>("radar_odom_mode", radar_odom_mode, "all");
   n.param<string>("radar_vel_mode", radar_vel_mode, "all");
   n.param<string>("sensor_type", sensor_type, "imugps");
-  n.param<double>("sc_dist_thres", scDistThres, 0.2);
+  n.param<double>("sc_dist_thres", scDistThres, 0);
+  n.param<double>("bag_start", bag_start,0);
+  n.param<double>("bag_duration", bag_duration, 1e6);
+  n.param<int>("vel_correction_freq", vel_correction_freq, 1);
+  n.param<bool>("save_keyframe", save_keyframe, false);
 
   pubRadarCloudLocal = n.advertise<sensor_msgs::PointCloud2>("/radar_cloud_local", 100);
   pubGtOdom = n.advertise<nav_msgs::Odometry>("/gt_odom",100);
@@ -2020,22 +2404,65 @@ int main(int argc, char **argv)
   // config_init(config);
   // radar_ego_velocity.configure(config);
   currOdom = Eigen::Matrix<double, 4, 4>::Identity();
+  currOdom_icp = Eigen::Matrix<double, 4, 4>::Identity();
+  currOdom_gicp = Eigen::Matrix<double, 4, 4>::Identity();
+  currOdom_ndt = Eigen::Matrix<double, 4, 4>::Identity();
+  currOdom_apdgicp = Eigen::Matrix<double, 4, 4>::Identity();
+
+  ISAM2Params parameters;
+  parameters.relinearizeThreshold = 0.01;
+  parameters.relinearizeSkip = 1;
+  isam = new ISAM2(parameters);
+
   initNoises();
   Init_KalmanInfo(&KF_Fliter,0.1,0.1);
   scManager.setSCdistThres(scDistThres);
+
+  std::vector<string> path_list(7);
   string outputfile = output_path  + sensor_type + "_" + radar_odom_mode +".csv";
   fp = fopen(outputfile.c_str(), "w+");
   fprintf(fp, "#time(s),x(m),y(m),z(m),roll,pitch,yaw,gt_x(m),gt_y(m),gt_z(m),roll,pitch,yaw,bias_gx,bias_gy,bias_gz,bias_wx,bias_wy,bias_wz\n");
   string radar_vel_path = output_path  + "vel_esti" + ".txt";
+  path_list[0] = radar_vel_path;
+
+  string radar_vel_filter_path = output_path + "vel_filter.txt";
+  path_list[1] = radar_vel_filter_path;
 
 
-  std::thread posegraph_odom {process_data, radar_vel_path}; // pose odom construction
+  string radar_icp_path = output_path + bag_name + "_icp.txt";
+  path_list[2] = radar_icp_path;
+
+
+  string radar_gicp_path = output_path + bag_name + "_gicp.txt";
+  path_list[3] = radar_gicp_path;
+
+
+  string radar_ndt_path = output_path + bag_name + "_ndt.txt";
+  path_list[4] = radar_ndt_path;
+ 
+
+  string radar_apdgicp_path = output_path + bag_name + "_apdgicp.txt";
+  path_list[5] = radar_apdgicp_path;
+
+  string gt_path = output_path + bag_name + "_gt.txt";
+  path_list[6] = gt_path;
+
+  std::thread posegraph_odom {process_data, path_list}; // pose odom construction
   std::thread posegraph_slam {process_pg}; // pose graph construction
 	std::thread lc_detection {process_lcd}; // loop closure detection 
   std::thread icp_calculation {process_LC_icp}; // loop constraint calculation via icp 
 	std::thread viz_map {process_viz_map}; // visualization - map (low frequency because it is heavy)
 	std::thread viz_path {process_viz_path}; // visualization - path (high frequency)
   ros::spin();
+
+  posegraph_odom.join();
+  posegraph_slam.join();
+  lc_detection.join();
+  icp_calculation.join();
+  viz_map.join();
+  viz_path.join();
+
+  return 0;
 }
 
 void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msg)
@@ -2043,7 +2470,9 @@ void callbackIMU(const sensor_msgs::ImuConstPtr &imu_msg)
   mutex_rawdata.lock();
   double dt = 0.01;
   if (std::fabs(last_imu.dt) > 1.0e-6)
+  {
     dt = (imu_msg->header.stamp - last_imu.time_stamp).toSec();
+  }
   last_imu = ImuDataStamped(imu_msg, dt);
   queue_imu.push(last_imu);
   mutex_rawdata.unlock();

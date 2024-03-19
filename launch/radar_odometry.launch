@@ -3,7 +3,9 @@
     <arg name="config" default="params_demo_dataset"/>
 
     <node name="radar_odometry" pkg="odometry_4dradar" type="radar_odometry" output="screen"> 
-        <param name="bag_path" type="string" value="/media/invoker/Toshiba_1T/data_jihe/test/2023-06-05-14-58-38.bag" />
+        <param name="bag_path" type="string" value="/media/invoker/7c55e174-1f14-4e90-beed-a4a0a04c709e/jihe_loop/fengshuominyuan/2023-06-05-16-43-19/" />
+        <!-- <param name="bag_path" type="string" value="/media/invoker/Toshiba_1T/data_jihe/test/" /> -->
+        <param name="bag_name" type="string" value="2023-06-05-16-43-19" />
         <param name="output_path" type="string" value="/home/invoker/catkin_ws/src/ICP-4DRadar/result/data_jihe/" />
         <param name="topic_radar0" type="string" value="/Radar_point_0" />
         <param name="topic_radar1" type="string" value="/Radar_point_1" />
@@ -16,8 +18,12 @@
         <param name="topic_imu" type="string" value="/rs/imu" />
         <param name="radar_odom_mode" type="string" value="all" />
         <param name="radar_vel_mode" type="string" value="fov" />
-        <param name="sensor_type" type="string" value="imuradar" />
-        <param name="sc_dist_thres" type="double" value="0.25"/> <!-- SC-A-LOAM, if want no outliers, use 0.1-0.15 -->
+        <param name="sensor_type" type="string" value="imuradarloop" />
+        <param name="sc_dist_thres" type="double" value="0.2"/> <!-- SC-A-LOAM, if want no outliers, use 0.1-0.15 -->
+        <param name="bag_start" type="double" value="0"/>
+        <param name="bag_duration" type="double" value="1e6"/>
+        <param name="vel_correction_freq" type="int" value="1"/>
+        <param name="save_keyframe" type="bool" value="false"/>
         <rosparam file="$(find odometry_4dradar)/config/$(arg config).yaml" command="load"/>
     </node>
 
